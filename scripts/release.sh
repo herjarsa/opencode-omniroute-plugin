@@ -49,15 +49,8 @@ echo "✓ Bitwarden accessible"
 
 # ── 3. fetch npm token ───────────────────────────────────────────────────────
 echo "→ fetching npm token from Bitwarden"
-NPM_TOKEN=$(bw --session "$BW_SESSION" get item "npmjs.com" 2>/dev/null \
-  | python3 -c "
-import sys, json
-item = json.load(sys.stdin)
-for f in item.get('fields', []):
-    if f.get('name') == 'opencode-omniroute-plugin':
-        print(f.get('value', ''))
-        break
-" 2>/dev/null)
+NPM_TOKEN=$(bw --session "$BW_SESSION" get item "npmjs.com" \
+  | jq -r '.fields[] | select(.name=="opencode-omniroute-plugin") | .value')
 
 if [[ -z "$NPM_TOKEN" ]]; then
   echo "✗ could not retrieve npm token from Bitwarden"
