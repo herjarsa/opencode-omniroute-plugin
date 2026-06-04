@@ -28,7 +28,7 @@
     "clean": "rm -rf dist",
     "test": "bun --test tests/*.test.ts",
     "release": "bun run clean && bun run build && bun run test && npm publish",
-    "prepublishOnly": "bun run clean && bun run build && bun run test"
+    "prepublishOnly": "bun run clean && bun run build && bun test tests/"
   },
   "keywords": [
     "omniroute",
