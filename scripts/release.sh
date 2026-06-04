@@ -70,7 +70,9 @@ bun test tests/
 
 # ── 7. publish ───────────────────────────────────────────────────────────────
 echo "→ publishing @mrmm/opencode-omniroute-plugin@$VERSION to npm"
-NODE_AUTH_TOKEN="$NPM_TOKEN" npm publish --access public
+echo -n "  npm 2FA OTP: "
+read -r OTP </dev/tty
+NODE_AUTH_TOKEN="$NPM_TOKEN" npm publish --access public --otp="$OTP"
 
 # ── 8. commit + tag + push ───────────────────────────────────────────────────
 echo "→ committing version bump"
