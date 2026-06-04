@@ -113,6 +113,14 @@ import { z } from "zod";
  *                           preferred over the chat/inference key.
  *  - `fetchInterceptor`     Inject Authorization: Bearer + Content-Type on
  *                           every outbound request to baseURL. Default true.
+ *  - `debugLog`             Capture every outbound request + response to a
+ *                           JSONL file at
+ *                           `~/.local/share/opencode/plugins/omniroute-debug-{providerId}.jsonl`.
+ *                           Each line: `{ reqId, ts, url, method, reqBody,
+ *                           resStatus, resBody, durationMs }`.
+ *                           Toggle at runtime via `omniroute_debug_enable /
+ *                           _disable` MCP tools (scripts/debug-mcp.ts).
+ *                           Default false.
  */
 const featuresSchema = z
   .object({
@@ -126,6 +134,7 @@ const featuresSchema = z
     usableOnly: z.boolean().optional(),
     diskCache: z.boolean().optional(),
     providerTag: z.boolean().optional(),
+    debugLog: z.boolean().optional(),
   })
   .strict();
 
@@ -285,6 +294,7 @@ export function createOmniRouteAuthHook(
   // documented and schema-validated but silently ignored.
   const wantFetchInterceptor = (features ?? {}).fetchInterceptor !== false;
   const wantGeminiSanitization = (features ?? {}).geminiSanitization !== false;
+  const wantDebugLog = (features ?? {}).debugLog === true;
 
   const hook: AuthHook = {
     provider: providerId,
@@ -345,6 +355,13 @@ export function createOmniRouteAuthHook(
         }
         if (wantGeminiSanitization) {
           composedFetch = createGeminiSanitizingFetch(composedFetch ?? fetch);
+        }
+        if (wantDebugLog || debugLogEnabled(providerId)) {
+          composedFetch = createDebugLoggingFetch(
+            composedFetch ?? fetch,
+            providerId,
+            wantDebugLog,
+          );
         }
         return composedFetch
           ? { apiKey, baseURL: resolvedBaseURL, fetch: composedFetch }
@@ -2439,6 +2456,217 @@ export function createOmniRouteProviderHook(
  * @see https://opencode.ai/docs/plugins for the AuthLoaderResult.fetch contract
  *      (the returned function is invoked by the AI-SDK in lieu of global fetch).
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// DEBUG LOGGING — request/response capture (features.debugLog)
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { homedir } from "os";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "fs";
+import { join } from "path";
+import { randomUUID } from "crypto";
+
+export interface DebugLogEntry {
+  reqId: string;
+  providerId: string;
+  ts: number;
+  url: string;
+  method: string;
+  reqHeaders: Record<string, string>;
+  reqBody: unknown;
+  resStatus: number | null;
+  resHeaders: Record<string, string>;
+  resBody: unknown;
+  durationMs: number | null;
+  error?: string;
+}
+
+function debugLogDir(): string {
+  const dir = join(homedir(), ".local", "share", "opencode", "plugins");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function debugLogPath(providerId: string): string {
+  return join(debugLogDir(), `omniroute-debug-${providerId}.jsonl`);
+}
+
+function debugStatePath(providerId: string): string {
+  return join(debugLogDir(), `omniroute-debug-${providerId}.state.json`);
+}
+
+export function debugLogEnabled(providerId: string): boolean {
+  try {
+    const p = debugStatePath(providerId);
+    if (!existsSync(p)) return false;
+    const s = JSON.parse(readFileSync(p, "utf8")) as { enabled?: boolean };
+    return s.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+export function debugLogSetEnabled(providerId: string, enabled: boolean): void {
+  writeFileSync(
+    debugStatePath(providerId),
+    JSON.stringify({ enabled }),
+    "utf8",
+  );
+}
+
+export function debugLogAppend(entry: DebugLogEntry): void {
+  appendFileSync(
+    debugLogPath(entry.providerId),
+    JSON.stringify(entry) + "\n",
+    "utf8",
+  );
+}
+
+export function debugLogRead(providerId: string, limit = 20): DebugLogEntry[] {
+  const p = debugLogPath(providerId);
+  if (!existsSync(p)) return [];
+  const lines = readFileSync(p, "utf8").trim().split("\n").filter(Boolean);
+  return lines
+    .slice(-limit)
+    .map((l) => {
+      try {
+        return JSON.parse(l) as DebugLogEntry;
+      } catch {
+        return null;
+      }
+    })
+    .filter((e): e is DebugLogEntry => e !== null);
+}
+
+export function debugLogGetById(
+  providerId: string,
+  reqId: string,
+): DebugLogEntry | null {
+  const p = debugLogPath(providerId);
+  if (!existsSync(p)) return null;
+  const lines = readFileSync(p, "utf8").trim().split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const e = JSON.parse(lines[i]) as DebugLogEntry;
+      if (e.reqId === reqId) return e;
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
+export function debugLogClear(providerId: string): void {
+  const p = debugLogPath(providerId);
+  if (existsSync(p)) writeFileSync(p, "", "utf8");
+}
+
+/**
+ * Wraps a fetch function to capture request/response pairs into the debug
+ * JSONL log. Only active when `debugLogEnabled(providerId)` returns true at
+ * call time — the flag is read on every request so enable/disable takes
+ * effect immediately without restarting OpenCode.
+ */
+export function createDebugLoggingFetch(
+  inner: typeof fetch,
+  providerId: string,
+  featureDefault: boolean,
+): typeof fetch {
+  return async (input, init = {}) => {
+    const active = featureDefault || debugLogEnabled(providerId);
+    if (!active) return inner(input, init);
+
+    const reqId = randomUUID();
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+    const method =
+      init.method ?? (input instanceof Request ? input.method : "GET");
+
+    const reqHeaders: Record<string, string> = {};
+    const headerSrc = init.headers
+      ? new Headers(init.headers)
+      : input instanceof Request
+        ? input.headers
+        : new Headers();
+    headerSrc.forEach((v, k) => {
+      reqHeaders[k] = k.toLowerCase() === "authorization" ? "[redacted]" : v;
+    });
+
+    let reqBody: unknown = undefined;
+    try {
+      if (init.body) {
+        reqBody =
+          typeof init.body === "string" ? JSON.parse(init.body) : "[binary]";
+      }
+    } catch {
+      reqBody = "[unparseable]";
+    }
+
+    const t0 = Date.now();
+    try {
+      const res = await inner(input, init);
+      const durationMs = Date.now() - t0;
+
+      const resHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        resHeaders[k] = v;
+      });
+
+      let resBody: unknown = undefined;
+      const clone = res.clone();
+      try {
+        const ct = res.headers.get("content-type") ?? "";
+        resBody = ct.includes("application/json")
+          ? await clone.json()
+          : await clone.text();
+      } catch {
+        resBody = "[unreadable]";
+      }
+
+      debugLogAppend({
+        reqId,
+        providerId,
+        ts: t0,
+        url,
+        method,
+        reqHeaders,
+        reqBody,
+        resStatus: res.status,
+        resHeaders,
+        resBody,
+        durationMs,
+      });
+
+      return res;
+    } catch (err) {
+      debugLogAppend({
+        reqId,
+        providerId,
+        ts: t0,
+        url,
+        method,
+        reqHeaders,
+        reqBody,
+        resStatus: null,
+        resHeaders: {},
+        resBody: null,
+        durationMs: Date.now() - t0,
+        error: String(err),
+      });
+      throw err;
+    }
+  };
+}
+
 export function createOmniRouteFetchInterceptor(config: {
   apiKey: string;
   baseURL: string;
