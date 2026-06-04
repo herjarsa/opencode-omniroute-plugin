@@ -1,6 +1,22 @@
 import { defineConfig } from "tsup";
+import { execSync } from "child_process";
+import { readFileSync } from "fs";
+
+const version = JSON.parse(readFileSync("package.json", "utf8"))
+  .version as string;
+const gitHash = (() => {
+  try {
+    return execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+  } catch {
+    return "unknown";
+  }
+})();
 
 export default defineConfig({
+  define: {
+    "globalThis.__PLUGIN_VERSION__": JSON.stringify(version),
+    "globalThis.__PLUGIN_GIT_HASH__": JSON.stringify(gitHash),
+  },
   entry: ["src/index.ts"],
   format: ["esm", "cjs"],
   dts: true,

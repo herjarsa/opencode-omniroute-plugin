@@ -478,8 +478,22 @@ export const OmniRoutePlugin: Plugin = async (_input, options) => {
   const sharedCache: OmniRouteFetchCache = new Map();
   // Debug breadcrumb: confirm server() invocation + resolved options.
   // Useful when diagnosing "is the plugin even running" from OC logs.
+  const _ver: string =
+    ((globalThis as Record<string, unknown>).__PLUGIN_VERSION__ as string) ??
+    "dev";
+  const _hash: string =
+    ((globalThis as Record<string, unknown>).__PLUGIN_GIT_HASH__ as string) ??
+    "unknown";
+  const _prefixes =
+    resolved.features?.apiFormat?.anthropicPrefixes ??
+    DEFAULT_ANTHROPIC_PREFIXES;
   console.warn(
-    `[omniroute-plugin] initialized providerId=${resolved.providerId} displayName="${resolved.displayName}" baseURL=${resolved.baseURL ?? "(from auth.json)"} modelCacheTtl=${resolved.modelCacheTtl}ms`,
+    `[omniroute-plugin] v${_ver} (${_hash}) initialized` +
+      ` providerId=${resolved.providerId}` +
+      ` baseURL=${resolved.baseURL ?? "(from auth.json)"}` +
+      ` modelCacheTtl=${resolved.modelCacheTtl}ms` +
+      ` apiFormat=anthropic:[${_prefixes.join(",")}]` +
+      ` debugLog=${resolved.features?.debugLog ?? false}`,
   );
   return {
     auth: createOmniRouteAuthHook(resolved),
