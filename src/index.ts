@@ -121,7 +121,31 @@ import { z } from "zod";
  *                           Toggle at runtime via `omniroute_debug_enable /
  *                           _disable` MCP tools (scripts/debug-mcp.ts).
  *                           Default false.
+ *  - `apiFormat`            Per-provider-prefix API format routing. Model IDs
+ *                           whose prefix (the part before `/`) matches an entry
+ *                           in `anthropicPrefixes` are served via the Anthropic
+ *                           SDK (`@ai-sdk/anthropic`, sends to `/v1/messages`
+ *                           with native cache_control, tool_choice, etc.).
+ *                           All other models fall back to `openai-compatible`.
+ *
+ *                           Default anthropicPrefixes: `["cc","claude","anthropic"]`
+ *                           (covers OmniRoute's canonical Anthropic aliases).
+ *
+ *                           Set `anthropicPrefixes: []` to disable and force
+ *                           everything through OpenAI-compat.
+ *
+ *                           Example:
+ *                           ```json
+ *                           "apiFormat": { "anthropicPrefixes": ["cc","claude","anthropic","kiro"] }
+ *                           ```
  */
+const apiFormatSchema = z
+  .object({
+    anthropicPrefixes: z.array(z.string()).optional(),
+  })
+  .strict()
+  .optional();
+
 const featuresSchema = z
   .object({
     combos: z.boolean().optional(),
@@ -135,6 +159,7 @@ const featuresSchema = z
     diskCache: z.boolean().optional(),
     providerTag: z.boolean().optional(),
     debugLog: z.boolean().optional(),
+    apiFormat: apiFormatSchema,
   })
   .strict();
 
@@ -172,6 +197,61 @@ function trimTrailingSlashes(value: string): string {
   let i = value.length;
   while (i > 0 && value.charCodeAt(i - 1) === 0x2f /* "/" */) i--;
   return i === value.length ? value : value.slice(0, i);
+}
+
+/**
+ * Ensure a baseURL ends with `/v1` so the OpenAI-compat SDK constructs
+ * `/v1/chat/completions` instead of `/chat/completions`.
+ * No-op when the URL already ends with `/v1` or `/v1/`.
+ */
+export function ensureV1Suffix(url: string): string {
+  const trimmed = trimTrailingSlashes(url);
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+/**
+ * Default provider prefixes that should use the Anthropic-native SDK.
+ * Covers all OmniRoute aliases that route to Anthropic upstream.
+ */
+export const DEFAULT_ANTHROPIC_PREFIXES = [
+  "cc",
+  "claude",
+  "anthropic",
+  "kiro",
+  "kr",
+];
+
+/**
+ * Resolve the `api` block for a ModelV2 entry given a model id and the
+ * active `apiFormat` feature config.
+ *
+ * - Models whose prefix (before the first `/`) is in `anthropicPrefixes` →
+ *   `{ id: "anthropic", url: baseURL, npm: "@ai-sdk/anthropic" }`
+ *   The Anthropic SDK appends `/v1/messages` automatically.
+ *
+ * - All others →
+ *   `{ id: "openai-compatible", url: baseURL/v1, npm: "@ai-sdk/openai-compatible" }`
+ */
+export function resolveApiBlock(
+  modelId: string,
+  baseURL: string,
+  apiFormat?: { anthropicPrefixes?: string[] },
+): { id: string; url: string; npm: string } {
+  const prefixes = apiFormat?.anthropicPrefixes ?? DEFAULT_ANTHROPIC_PREFIXES;
+  const slash = modelId.indexOf("/");
+  const prefix = slash === -1 ? modelId : modelId.slice(0, slash);
+  const isAnthropic = prefixes.includes(prefix);
+  return isAnthropic
+    ? {
+        id: "anthropic",
+        url: trimTrailingSlashes(baseURL),
+        npm: "@ai-sdk/anthropic",
+      }
+    : {
+        id: "openai-compatible",
+        url: ensureV1Suffix(baseURL),
+        npm: "@ai-sdk/openai-compatible",
+      };
 }
 function trimTrailingDashes(value: string): string {
   let i = value.length;
@@ -356,7 +436,7 @@ export function createOmniRouteAuthHook(
         if (wantGeminiSanitization) {
           composedFetch = createGeminiSanitizingFetch(composedFetch ?? fetch);
         }
-        if (wantDebugLog || debugLogEnabled(providerId)) {
+        if (wantDebugLog) {
           composedFetch = createDebugLoggingFetch(
             composedFetch ?? fetch,
             providerId,
@@ -608,7 +688,11 @@ export const defaultOmniRouteModelsFetcher: OmniRouteModelsFetcher = async (
 
 export function mapRawModelToModelV2(
   raw: OmniRouteRawModelEntry,
-  ctx: { providerId: string; baseURL: string },
+  ctx: {
+    providerId: string;
+    baseURL: string;
+    apiFormat?: { anthropicPrefixes?: string[] };
+  },
 ): ModelV2 {
   const caps = raw.capabilities ?? {};
   const inMods = new Set(raw.input_modalities ?? ["text"]);
@@ -662,11 +746,7 @@ export function mapRawModelToModelV2(
     headers: {},
     release_date: raw.release_date ?? "",
     providerID: ctx.providerId,
-    api: {
-      id: "openai-compatible",
-      url: ctx.baseURL,
-      npm: "@ai-sdk/openai-compatible",
-    },
+    api: resolveApiBlock(raw.id, ctx.baseURL, ctx.apiFormat),
   };
 }
 
@@ -859,6 +939,7 @@ export function mapComboToModelV2(
   members: OmniRouteRawModelEntry[],
   providerId: string,
   baseURL: string,
+  apiFormat?: { anthropicPrefixes?: string[] },
 ): ModelV2 {
   // `every` over an empty array returns true (would lie about an empty
   // combo's capabilities) — short-circuit to all-false when no members.
@@ -922,14 +1003,27 @@ export function mapComboToModelV2(
       hasMembers && members.every((m) => Boolean(m.capabilities?.thinking)),
   };
 
+  // Combos span multiple providers. Use Anthropic format only when ALL
+  // members resolve to Anthropic — otherwise fall back to OpenAI-compat
+  // (lowest common denominator that every upstream understands).
+  const comboApiBlock = (() => {
+    if (!hasMembers) return resolveApiBlock("", baseURL, apiFormat);
+    const allAnthropic = members.every(
+      (m) => resolveApiBlock(m.id, baseURL, apiFormat).id === "anthropic",
+    );
+    return allAnthropic
+      ? resolveApiBlock(members[0].id, baseURL, apiFormat)
+      : {
+          id: "openai-compatible",
+          url: ensureV1Suffix(baseURL),
+          npm: "@ai-sdk/openai-compatible",
+        };
+  })();
+
   return {
     id: combo.id,
     providerID: providerId,
-    api: {
-      id: "openai-compatible",
-      url: baseURL,
-      npm: "@ai-sdk/openai-compatible",
-    },
+    api: comboApiBlock,
     name: combo.name && combo.name.trim().length > 0 ? combo.name : combo.id,
     capabilities,
     cost: {
@@ -2287,6 +2381,7 @@ export function createOmniRouteProviderHook(
         const model = mapRawModelToModelV2(entry, {
           providerId: resolved.providerId,
           baseURL,
+          apiFormat: features.apiFormat,
         });
         const enrichEntry = lookupEnrichment(
           entry.id,
@@ -2368,6 +2463,7 @@ export function createOmniRouteProviderHook(
           memberEntries,
           resolved.providerId,
           baseURL,
+          features.apiFormat,
         );
         const hasMembers = memberEntries.length > 0;
 
@@ -2484,6 +2580,57 @@ export interface DebugLogEntry {
   resBody: unknown;
   durationMs: number | null;
   error?: string;
+  /** Parsed from SSE trailing comments (real values when headers show 0) */
+  sseTokensIn?: number;
+  sseTokensOut?: number;
+  sseCost?: number;
+  sseModel?: string;
+  sseProvider?: string;
+  /** Parsed assistant reply text from SSE stream */
+  replyText?: string;
+}
+
+/** Parse OmniRoute SSE trailing comments + assistant content from a stream body string. */
+export function parseSseDebugMeta(body: string): {
+  tokensIn?: number;
+  tokensOut?: number;
+  cost?: number;
+  model?: string;
+  provider?: string;
+  replyText?: string;
+} {
+  if (typeof body !== "string") return {};
+  const result: ReturnType<typeof parseSseDebugMeta> = {};
+  let reply = "";
+  for (const line of body.split("\n")) {
+    const t = line.trim();
+    // OmniRoute SSE comment metadata: `: x-omniroute-tokens-in=333`
+    if (t.startsWith(":")) {
+      const kv = t.slice(1).trim();
+      const eq = kv.indexOf("=");
+      if (eq === -1) continue;
+      const k = kv.slice(0, eq).trim();
+      const v = kv.slice(eq + 1).trim();
+      if (k === "x-omniroute-tokens-in") result.tokensIn = Number(v);
+      else if (k === "x-omniroute-tokens-out") result.tokensOut = Number(v);
+      else if (k === "x-omniroute-response-cost") result.cost = Number(v);
+      else if (k === "x-omniroute-model") result.model = v;
+      else if (k === "x-omniroute-provider") result.provider = v;
+    }
+    // Parse assistant content from data chunks
+    if (t.startsWith("data:") && !t.includes("[DONE]")) {
+      try {
+        const chunk = JSON.parse(t.slice(5)) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+        };
+        reply += chunk.choices?.[0]?.delta?.content ?? "";
+      } catch {
+        /**/
+      }
+    }
+  }
+  if (reply) result.replyText = reply;
+  return result;
 }
 
 function debugLogDir(): string {
@@ -2632,6 +2779,8 @@ export function createDebugLoggingFetch(
         resBody = "[unreadable]";
       }
 
+      const sseMeta =
+        typeof resBody === "string" ? parseSseDebugMeta(resBody) : {};
       debugLogAppend({
         reqId,
         providerId,
@@ -2644,6 +2793,12 @@ export function createDebugLoggingFetch(
         resHeaders,
         resBody,
         durationMs,
+        sseTokensIn: sseMeta.tokensIn,
+        sseTokensOut: sseMeta.tokensOut,
+        sseCost: sseMeta.cost,
+        sseModel: sseMeta.model,
+        sseProvider: sseMeta.provider,
+        replyText: sseMeta.replyText,
       });
 
       return res;

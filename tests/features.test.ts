@@ -36,12 +36,14 @@ import {
   canonicalDedupSet,
   createOmniRouteConfigHook,
   createOmniRouteProviderHook,
+  DEFAULT_ANTHROPIC_PREFIXES,
   defaultOmniRouteEnrichmentFetcher,
   defaultOmniRouteCompressionMetaFetcher,
   formatCompressionPipeline,
   lookupEnrichment,
   normaliseFreeLabel,
   parseOmniRoutePluginOptions,
+  resolveApiBlock,
   PROVIDER_TAG_SEPARATOR,
   resolveProviderTagEntry,
   type OmniRouteEnrichmentMap,
@@ -156,6 +158,58 @@ test("applyEnrichment: name overlay applied", () => {
   const m = baseModel();
   applyEnrichment(m as never, { name: "Claude Sonnet 4.6" });
   assert.equal(m.name, "Claude Sonnet 4.6");
+});
+
+// resolveApiBlock
+const BASE = "https://or.example.com";
+
+test("resolveApiBlock: cc/ prefix → anthropic", () => {
+  const b = resolveApiBlock("cc/claude-sonnet-4-6", BASE);
+  assert.equal(b.id, "anthropic");
+  assert.equal(b.url, BASE);
+  assert.equal(b.npm, "@ai-sdk/anthropic");
+});
+test("resolveApiBlock: claude/ prefix → anthropic", () => {
+  assert.equal(resolveApiBlock("claude/claude-opus-4-8", BASE).id, "anthropic");
+});
+test("resolveApiBlock: anthropic/ prefix → anthropic", () => {
+  assert.equal(resolveApiBlock("anthropic/claude-haiku", BASE).id, "anthropic");
+});
+test("resolveApiBlock: gpt-4o (no prefix) → openai-compatible", () => {
+  const b = resolveApiBlock("gpt-4o", BASE);
+  assert.equal(b.id, "openai-compatible");
+  assert.equal(b.url, `${BASE}/v1`);
+});
+test("resolveApiBlock: gemini/gemini-2.5-pro → openai-compatible", () => {
+  assert.equal(
+    resolveApiBlock("gemini/gemini-2.5-pro", BASE).id,
+    "openai-compatible",
+  );
+});
+test("resolveApiBlock: custom anthropicPrefixes override", () => {
+  const b = resolveApiBlock("kiro/claude-sonnet", BASE, {
+    anthropicPrefixes: ["kiro"],
+  });
+  assert.equal(b.id, "anthropic");
+});
+test("resolveApiBlock: empty anthropicPrefixes → all openai-compatible", () => {
+  assert.equal(
+    resolveApiBlock("cc/claude-sonnet-4-6", BASE, { anthropicPrefixes: [] }).id,
+    "openai-compatible",
+  );
+});
+test("resolveApiBlock: ensureV1Suffix on openai-compat", () => {
+  const b = resolveApiBlock("gpt-4o", "https://or.example.com/");
+  assert.equal(b.url, "https://or.example.com/v1");
+});
+test("resolveApiBlock: no double v1 on already-v1 url", () => {
+  const b = resolveApiBlock("gpt-4o", "https://or.example.com/v1");
+  assert.equal(b.url, "https://or.example.com/v1");
+});
+test("DEFAULT_ANTHROPIC_PREFIXES contains cc and claude", () => {
+  assert.ok(DEFAULT_ANTHROPIC_PREFIXES.includes("cc"));
+  assert.ok(DEFAULT_ANTHROPIC_PREFIXES.includes("claude"));
+  assert.ok(DEFAULT_ANTHROPIC_PREFIXES.includes("anthropic"));
 });
 
 // normaliseFreeLabel
