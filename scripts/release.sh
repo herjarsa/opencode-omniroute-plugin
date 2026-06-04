@@ -4,13 +4,14 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # release.sh — build, test, publish to npm, tag + push
 #
-# Usage (run from a real terminal, not a sub-shell):
-#   export BW_SESSION=$(bw unlock --raw)
+# Usage (run from a real terminal):
 #   bash scripts/release.sh [patch|minor|major|<version>]
 #
-# NPM token pulled from Bitwarden:
+# NPM token pulled from Bitwarden via wrapper (Touch ID, no manual unlock needed):
 #   item  : "npmjs.com"
-#   field : "opencode-omniroute-plugin" (type: hidden)
+#   field : "opencode-omniroute-plugin"
+#
+# Requires: /Users/mourad.maatoug/.config/zsh/bitwarden_session_wrapper.zsh
 #
 # Requires: bw, bun, npm, git
 # ---------------------------------------------------------------------------
@@ -30,26 +31,19 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-# ── 2. ensure bitwarden session ─────────────────────────────────────────────
-# Requires BW_SESSION to be exported in the calling shell:
-#   export BW_SESSION=$(bw unlock --raw)
-#   bash scripts/release.sh [patch|minor|major]
-if [[ -z "${BW_SESSION:-}" ]]; then
-  echo "✗ BW_SESSION not set"
-  echo "  run first: export BW_SESSION=\$(bw unlock --raw)"
+# ── 2. load bitwarden wrapper ───────────────────────────────────────────────
+BW_WRAPPER="$HOME/.config/zsh/bitwarden_session_wrapper.zsh"
+if [[ ! -f "$BW_WRAPPER" ]]; then
+  echo "✗ Bitwarden wrapper not found: $BW_WRAPPER"
   exit 1
 fi
-echo "→ checking Bitwarden access"
-if ! bw --session "$BW_SESSION" get item "npmjs.com" &>/dev/null; then
-  echo "✗ Bitwarden session invalid or item 'npmjs.com' not found"
-  echo "  re-run: export BW_SESSION=\$(bw unlock --raw)"
-  exit 1
-fi
-echo "✓ Bitwarden accessible"
+# shellcheck source=/dev/null
+source "$BW_WRAPPER"
+echo "✓ Bitwarden wrapper loaded (Touch ID session management)"
 
 # ── 3. fetch npm token ───────────────────────────────────────────────────────
 echo "→ fetching npm token from Bitwarden"
-NPM_TOKEN=$(bw --session "$BW_SESSION" get item "npmjs.com" \
+NPM_TOKEN=$(bw get item "npmjs.com" \
   | jq -r '.fields[] | select(.name=="opencode-omniroute-plugin") | .value')
 
 if [[ -z "$NPM_TOKEN" ]]; then
