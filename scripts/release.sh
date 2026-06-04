@@ -4,8 +4,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # release.sh — build, test, publish to npm, tag + push
 #
-# Usage:
-#   ./scripts/release.sh [patch|minor|major|<version>]
+# Usage (run from a real terminal, not a sub-shell):
+#   export BW_SESSION=$(bw unlock --raw)
+#   bash scripts/release.sh [patch|minor|major|<version>]
 #
 # NPM token pulled from Bitwarden:
 #   item  : "npmjs.com"
@@ -29,22 +30,26 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-# ── 2. check bitwarden session ──────────────────────────────────────────────
-# If BW_SESSION is already exported in the calling shell, it will be inherited.
-# If not, bw will attempt to use the desktop app's keychain session.
-# To unlock manually before running: eval $(bw unlock --raw) && export BW_SESSION
+# ── 2. ensure bitwarden session ─────────────────────────────────────────────
+# Requires BW_SESSION to be exported in the calling shell:
+#   export BW_SESSION=$(bw unlock --raw)
+#   bash scripts/release.sh [patch|minor|major]
+if [[ -z "${BW_SESSION:-}" ]]; then
+  echo "✗ BW_SESSION not set"
+  echo "  run first: export BW_SESSION=\$(bw unlock --raw)"
+  exit 1
+fi
 echo "→ checking Bitwarden access"
-if ! bw get item "npmjs.com" &>/dev/null; then
-  echo "✗ Bitwarden vault is locked or item not found"
-  echo "  run: export BW_SESSION=\$(bw unlock --raw)"
-  echo "  then re-run: bash scripts/release.sh $BUMP"
+if ! bw --session "$BW_SESSION" get item "npmjs.com" &>/dev/null; then
+  echo "✗ Bitwarden session invalid or item 'npmjs.com' not found"
+  echo "  re-run: export BW_SESSION=\$(bw unlock --raw)"
   exit 1
 fi
 echo "✓ Bitwarden accessible"
 
 # ── 3. fetch npm token ───────────────────────────────────────────────────────
 echo "→ fetching npm token from Bitwarden"
-NPM_TOKEN=$(bw get item "npmjs.com" 2>/dev/null \
+NPM_TOKEN=$(bw --session "$BW_SESSION" get item "npmjs.com" 2>/dev/null \
   | python3 -c "
 import sys, json
 item = json.load(sys.stdin)
