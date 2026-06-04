@@ -31,16 +31,19 @@ fi
 
 # ── 2. unlock bitwarden ─────────────────────────────────────────────────────
 BW_STATUS=$(bw status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','locked'))" 2>/dev/null || echo "locked")
+echo "  vault status: $BW_STATUS"
 
-if [[ "$BW_STATUS" == "locked" ]]; then
-  echo "→ unlocking Bitwarden vault"
-  BW_SESSION=$(bw unlock --raw)
-  export BW_SESSION
-elif [[ "$BW_STATUS" == "unauthenticated" ]]; then
+if [[ "$BW_STATUS" == "unauthenticated" ]]; then
   echo "→ logging in to Bitwarden"
   bw login
   BW_SESSION=$(bw unlock --raw)
   export BW_SESSION
+elif [[ "$BW_STATUS" == "locked" ]]; then
+  echo "→ unlocking Bitwarden vault (Touch ID or master password)"
+  BW_SESSION=$(bw unlock --raw)
+  export BW_SESSION
+else
+  echo "✓ vault already unlocked"
 fi
 
 # ── 3. fetch npm token ───────────────────────────────────────────────────────
