@@ -40,7 +40,7 @@ if [[ "$BW_STATUS" == "unauthenticated" ]]; then
   export BW_SESSION
 elif [[ "$BW_STATUS" == "locked" ]]; then
   echo "→ unlocking Bitwarden vault (Touch ID or master password)"
-  BW_SESSION=$(bw unlock --raw)
+  BW_SESSION=$(bw unlock --raw </dev/tty)
   export BW_SESSION
 else
   echo "✓ vault already unlocked"
