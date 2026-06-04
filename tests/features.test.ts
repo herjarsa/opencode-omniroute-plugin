@@ -40,6 +40,7 @@ import {
   defaultOmniRouteCompressionMetaFetcher,
   formatCompressionPipeline,
   lookupEnrichment,
+  normaliseFreeLabel,
   parseOmniRoutePluginOptions,
   PROVIDER_TAG_SEPARATOR,
   resolveProviderTagEntry,
@@ -87,7 +88,7 @@ test("parseOmniRoutePluginOptions: unknown features key → throws (strict)", ()
       parseOmniRoutePluginOptions({
         features: { combos: true, unknown_field: "oops" },
       }),
-    /Invalid @omniroute\/opencode-plugin options/
+    /Invalid @omniroute\/opencode-plugin options/,
   );
 });
 
@@ -97,14 +98,14 @@ test("parseOmniRoutePluginOptions: non-boolean for boolean feature → throws", 
       parseOmniRoutePluginOptions({
         features: { combos: "yes" as unknown as boolean },
       }),
-    /Invalid @omniroute\/opencode-plugin options/
+    /Invalid @omniroute\/opencode-plugin options/,
   );
 });
 
 test("parseOmniRoutePluginOptions: empty mcpToken → throws (min 1)", () => {
   assert.throws(
     () => parseOmniRoutePluginOptions({ features: { mcpToken: "" } }),
-    /Invalid @omniroute\/opencode-plugin options/
+    /Invalid @omniroute\/opencode-plugin options/,
   );
 });
 
@@ -121,7 +122,13 @@ const baseModel = () => ({
     attachment: false,
     toolcall: false,
     input: { text: true, audio: false, image: false, video: false, pdf: false },
-    output: { text: true, audio: false, image: false, video: false, pdf: false },
+    output: {
+      text: true,
+      audio: false,
+      image: false,
+      video: false,
+      pdf: false,
+    },
     interleaved: false,
   },
   cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
@@ -149,6 +156,31 @@ test("applyEnrichment: name overlay applied", () => {
   const m = baseModel();
   applyEnrichment(m as never, { name: "Claude Sonnet 4.6" });
   assert.equal(m.name, "Claude Sonnet 4.6");
+});
+
+// normaliseFreeLabel
+test("normaliseFreeLabel: trailing (Free) → [Free] prefix", () => {
+  assert.equal(normaliseFreeLabel("GPT-4.1 (Free)"), "[Free] GPT-4.1");
+});
+test("normaliseFreeLabel: trailing Free word → [Free] prefix", () => {
+  assert.equal(
+    normaliseFreeLabel("DeepSeek V4 Flash Free"),
+    "[Free] DeepSeek V4 Flash",
+  );
+});
+test("normaliseFreeLabel: hyphen-free suffix → [Free] prefix", () => {
+  assert.equal(normaliseFreeLabel("Model-Free"), "[Free] Model");
+});
+test("normaliseFreeLabel: non-free name unchanged", () => {
+  assert.equal(normaliseFreeLabel("Claude Opus 4.7"), "Claude Opus 4.7");
+});
+test("normaliseFreeLabel: already [Free] prefix → unchanged", () => {
+  assert.equal(normaliseFreeLabel("[Free] GPT-4.1"), "[Free] GPT-4.1");
+});
+test("applyEnrichment: (Free) suffix normalised to [Free] prefix", () => {
+  const m = baseModel();
+  applyEnrichment(m as never, { name: "GPT-4.1 (Free)" });
+  assert.equal(m.name, "[Free] GPT-4.1");
 });
 
 test("applyEnrichment: empty name string ignored", () => {
@@ -233,7 +265,10 @@ test("applyProviderTag: long alias (no displayName) → title-case fallback, not
 test("applyProviderTag: displayName fits new 12-char cap → used verbatim (AssemblyAI/Antigravity)", () => {
   const m1 = baseModel();
   m1.name = "Universal 2 (Transcription)";
-  applyProviderTag(m1 as never, { providerDisplayName: "AssemblyAI", providerAlias: "aai" });
+  applyProviderTag(m1 as never, {
+    providerDisplayName: "AssemblyAI",
+    providerAlias: "aai",
+  });
   assert.equal(m1.name, "AssemblyAI - Universal 2 (Transcription)");
 
   const m2 = baseModel();
@@ -284,7 +319,7 @@ test("formatCompressionPipeline: empty pipeline → empty string", () => {
 test("formatCompressionPipeline: single step with intensity → emoji", () => {
   assert.equal(
     formatCompressionPipeline([{ engine: "caveman", intensity: "full" }]),
-    "[caveman\u{1F7E0}]"
+    "[caveman\u{1F7E0}]",
   );
 });
 
@@ -294,7 +329,7 @@ test("formatCompressionPipeline: multi-step pipeline → emoji per step", () => 
       { engine: "rtk", intensity: "standard" },
       { engine: "caveman", intensity: "full" },
     ]),
-    "[rtk\u{1F7E1} → caveman\u{1F7E0}]"
+    "[rtk\u{1F7E1} → caveman\u{1F7E0}]",
   );
 });
 
@@ -305,33 +340,36 @@ test("formatCompressionPipeline: step without intensity → engine bare", () => 
 test("formatCompressionPipeline: ultra → red", () => {
   assert.equal(
     formatCompressionPipeline([{ engine: "caveman", intensity: "ultra" }]),
-    "[caveman\u{1F534}]"
+    "[caveman\u{1F534}]",
   );
 });
 
 test("formatCompressionPipeline: lite/minimal → green", () => {
-  assert.equal(formatCompressionPipeline([{ engine: "rtk", intensity: "lite" }]), "[rtk\u{1F7E2}]");
+  assert.equal(
+    formatCompressionPipeline([{ engine: "rtk", intensity: "lite" }]),
+    "[rtk\u{1F7E2}]",
+  );
   assert.equal(
     formatCompressionPipeline([{ engine: "rtk", intensity: "minimal" }]),
-    "[rtk\u{1F7E2}]"
+    "[rtk\u{1F7E2}]",
   );
 });
 
 test("formatCompressionPipeline: intensity case-insensitive", () => {
   assert.equal(
     formatCompressionPipeline([{ engine: "caveman", intensity: "ULTRA" }]),
-    "[caveman\u{1F534}]"
+    "[caveman\u{1F534}]",
   );
   assert.equal(
     formatCompressionPipeline([{ engine: "caveman", intensity: "Standard" }]),
-    "[caveman\u{1F7E1}]"
+    "[caveman\u{1F7E1}]",
   );
 });
 
 test("formatCompressionPipeline: unknown intensity falls back to raw text", () => {
   assert.equal(
     formatCompressionPipeline([{ engine: "rtk", intensity: "custom-thing" }]),
-    "[rtk:custom-thing]"
+    "[rtk:custom-thing]",
   );
 });
 
@@ -352,7 +390,12 @@ const SAMPLE_RAW: OmniRouteRawModelEntry[] = [
     max_output_tokens: 64000,
     input_modalities: ["text", "image"],
     output_modalities: ["text"],
-    capabilities: { tool_calling: true, reasoning: true, vision: true, thinking: true },
+    capabilities: {
+      tool_calling: true,
+      reasoning: true,
+      vision: true,
+      thinking: true,
+    },
   },
 ];
 
@@ -361,7 +404,10 @@ const apiAuth = (key: string) => ({ type: "api" as const, key });
 test("provider hook: enrichment fetcher called when features.enrichment !== false", async () => {
   let called = 0;
   const enrichment: OmniRouteEnrichmentMap = new Map([
-    ["claude-sonnet-4-6", { name: "Claude Sonnet 4.6", pricing: { input: 3, output: 15 } }],
+    [
+      "claude-sonnet-4-6",
+      { name: "Claude Sonnet 4.6", pricing: { input: 3, output: 15 } },
+    ],
   ]);
   const hook = createOmniRouteProviderHook(
     { providerId: "omniroute", baseURL: "https://or.example.com/v1" },
@@ -372,7 +418,7 @@ test("provider hook: enrichment fetcher called when features.enrichment !== fals
         called++;
         return enrichment;
       },
-    }
+    },
   );
   const out = await hook.models!({} as never, { auth: apiAuth("sk") as never });
   assert.equal(called, 1, "enrichment fetcher called once");
@@ -397,11 +443,15 @@ test("provider hook: enrichment fetcher NOT called when features.enrichment:fals
         called++;
         return new Map();
       },
-    }
+    },
   );
   const out = await hook.models!({} as never, { auth: apiAuth("sk") as never });
   assert.equal(called, 0, "enrichment fetcher NOT called when gated off");
-  assert.equal(out["claude-sonnet-4-6"].name, "claude-sonnet-4-6", "raw id preserved");
+  assert.equal(
+    out["claude-sonnet-4-6"].name,
+    "claude-sonnet-4-6",
+    "raw id preserved",
+  );
 });
 
 test("provider hook: compression metadata fetcher NOT called by default (opt-in)", async () => {
@@ -416,10 +466,14 @@ test("provider hook: compression metadata fetcher NOT called by default (opt-in)
         called++;
         return [];
       },
-    }
+    },
   );
   await hook.models!({} as never, { auth: apiAuth("sk") as never });
-  assert.equal(called, 0, "compression metadata is opt-in (features.compressionMetadata:true)");
+  assert.equal(
+    called,
+    0,
+    "compression metadata is opt-in (features.compressionMetadata:true)",
+  );
 });
 
 test("provider hook: compression metadata fetcher called when opted in", async () => {
@@ -455,7 +509,7 @@ test("provider hook: compression metadata fetcher called when opted in", async (
         called++;
         return compressionCombos;
       },
-    }
+    },
   );
   const out = await hook.models!({} as never, { auth: apiAuth("sk") as never });
   assert.equal(called, 1, "compression metadata fetcher called");
@@ -464,7 +518,7 @@ test("provider hook: compression metadata fetcher called when opted in", async (
   assert.match(
     combo.name,
     /\[rtk\u{1F7E1} → caveman\u{1F7E0}\]/u,
-    "combo name decorated with emoji pipeline (rtk:standard=🟡, caveman:full=🟠)"
+    "combo name decorated with emoji pipeline (rtk:standard=🟡, caveman:full=🟠)",
   );
 });
 
@@ -484,9 +538,12 @@ test("config hook: MCP auto-emit OFF by default (no mcp entry)", async () => {
       fetcher: async () => SAMPLE_RAW,
       combosFetcher: async () => [],
       logger: { warn: () => {} },
-    }
+    },
   );
-  const input: { provider?: Record<string, unknown>; mcp?: Record<string, unknown> } = {};
+  const input: {
+    provider?: Record<string, unknown>;
+    mcp?: Record<string, unknown>;
+  } = {};
   await hook(input as never);
   assert.ok(input.provider?.omniroute, "provider block written");
   assert.equal(input.mcp, undefined, "no mcp block written");
@@ -504,19 +561,27 @@ test("config hook: features.mcpAutoEmit:true writes mcp entry with provider apiK
       fetcher: async () => SAMPLE_RAW,
       combosFetcher: async () => [],
       logger: { warn: () => {} },
-    }
+    },
   );
-  const input: { provider?: Record<string, unknown>; mcp?: Record<string, unknown> } = {};
+  const input: {
+    provider?: Record<string, unknown>;
+    mcp?: Record<string, unknown>;
+  } = {};
   await hook(input as never);
   const entry = input.mcp?.omniroute as
-    | { type: string; url: string; enabled: boolean; headers: Record<string, string> }
+    | {
+        type: string;
+        url: string;
+        enabled: boolean;
+        headers: Record<string, string>;
+      }
     | undefined;
   assert.ok(entry, "mcp entry written");
   assert.equal(entry.type, "remote");
   assert.equal(
     entry.url,
     "https://or.example.com/api/mcp/stream",
-    "baseURL /v1 stripped to /api/mcp/stream"
+    "baseURL /v1 stripped to /api/mcp/stream",
   );
   assert.equal(entry.enabled, true);
   assert.equal(entry.headers.Authorization, "Bearer sk-prod-key");
@@ -534,15 +599,18 @@ test("config hook: features.mcpToken overrides provider apiKey in mcp Bearer", a
       fetcher: async () => SAMPLE_RAW,
       combosFetcher: async () => [],
       logger: { warn: () => {} },
-    }
+    },
   );
-  const input: { provider?: Record<string, unknown>; mcp?: Record<string, unknown> } = {};
+  const input: {
+    provider?: Record<string, unknown>;
+    mcp?: Record<string, unknown>;
+  } = {};
   await hook(input as never);
   const entry = input.mcp?.omniroute as { headers: Record<string, string> };
   assert.equal(
     entry.headers.Authorization,
     "Bearer sk-mcp-narrower",
-    "mcpToken takes precedence over apiKey"
+    "mcpToken takes precedence over apiKey",
   );
 });
 
@@ -558,16 +626,24 @@ test("config hook: existing operator mcp.<providerId> wins (no overwrite)", asyn
       fetcher: async () => SAMPLE_RAW,
       combosFetcher: async () => [],
       logger: { warn: () => {} },
-    }
+    },
   );
-  const input: { provider?: Record<string, unknown>; mcp?: Record<string, unknown> } = {
-    mcp: { omniroute: { type: "custom-user-entry", url: "https://manual.example/mcp" } },
+  const input: {
+    provider?: Record<string, unknown>;
+    mcp?: Record<string, unknown>;
+  } = {
+    mcp: {
+      omniroute: {
+        type: "custom-user-entry",
+        url: "https://manual.example/mcp",
+      },
+    },
   };
   await hook(input as never);
   assert.deepEqual(
     input.mcp?.omniroute,
     { type: "custom-user-entry", url: "https://manual.example/mcp" },
-    "operator override preserved"
+    "operator override preserved",
   );
 });
 
@@ -585,15 +661,18 @@ test("config hook: features.mcpAutoEmit:true with /v1 in baseURL → strips corr
       fetcher: async () => SAMPLE_RAW,
       combosFetcher: async () => [],
       logger: { warn: () => {} },
-    }
+    },
   );
-  const input: { provider?: Record<string, unknown>; mcp?: Record<string, unknown> } = {};
+  const input: {
+    provider?: Record<string, unknown>;
+    mcp?: Record<string, unknown>;
+  } = {};
   await hook(input as never);
   const entry = input.mcp?.["omniroute-preprod"] as { url: string };
   assert.equal(
     entry.url,
     "https://or-preprod.example.com/api/mcp/stream",
-    "/v1 stripped, /api/mcp/stream appended"
+    "/v1 stripped, /api/mcp/stream appended",
   );
 });
 
@@ -607,7 +686,11 @@ test("defaultOmniRouteEnrichmentFetcher: empty baseURL → empty map", async () 
 });
 
 test("defaultOmniRouteEnrichmentFetcher: empty apiKey → empty map", async () => {
-  const m = await defaultOmniRouteEnrichmentFetcher("https://or.example.com", "", 100);
+  const m = await defaultOmniRouteEnrichmentFetcher(
+    "https://or.example.com",
+    "",
+    100,
+  );
   assert.equal(m.size, 0);
 });
 
@@ -627,7 +710,8 @@ test("defaultOmniRouteEnrichmentFetcher: merges names from /api/pricing/models a
   const origFetch = globalThis.fetch;
   const calls: string[] = [];
   globalThis.fetch = (async (input: unknown) => {
-    const url = typeof input === "string" ? input : (input as { url: string }).url;
+    const url =
+      typeof input === "string" ? input : (input as { url: string }).url;
     calls.push(url);
     if (url.endsWith("/api/pricing/models")) {
       return new Response(
@@ -638,11 +722,15 @@ test("defaultOmniRouteEnrichmentFetcher: merges names from /api/pricing/models a
             name: "Cc",
             models: [
               { id: "claude-opus-4-7", name: "Claude Opus 4.7", custom: false },
-              { id: "claude-sonnet-4-6", name: "Claude 4.6 Sonnet", custom: false },
+              {
+                id: "claude-sonnet-4-6",
+                name: "Claude 4.6 Sonnet",
+                custom: false,
+              },
             ],
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
     if (url.endsWith("/api/pricing")) {
@@ -662,7 +750,7 @@ test("defaultOmniRouteEnrichmentFetcher: merges names from /api/pricing/models a
             },
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
     return new Response("not found", { status: 404 });
@@ -672,23 +760,31 @@ test("defaultOmniRouteEnrichmentFetcher: merges names from /api/pricing/models a
     const map = await defaultOmniRouteEnrichmentFetcher(
       "https://or.example.com/v1",
       "sk-test",
-      5_000
+      5_000,
     );
     assert.ok(
       calls.some((u) => u.endsWith("/api/pricing/models")),
-      "catalog endpoint hit"
+      "catalog endpoint hit",
     );
     assert.ok(
       calls.some((u) => u.endsWith("/api/pricing")),
-      "pricing endpoint hit"
+      "pricing endpoint hit",
     );
     const opus = map.get("cc/claude-opus-4-7");
     assert.ok(opus, "namespaced entry present");
-    assert.equal(opus?.name, "Claude Opus 4.7", "name from /api/pricing/models");
+    assert.equal(
+      opus?.name,
+      "Claude Opus 4.7",
+      "name from /api/pricing/models",
+    );
     assert.equal(opus?.pricing?.input, 5, "input price merged");
     assert.equal(opus?.pricing?.output, 25, "output price merged");
     assert.equal(opus?.pricing?.cacheRead, 0.5, "cached → cacheRead alias");
-    assert.equal(opus?.pricing?.cacheWrite, 6.25, "cache_creation → cacheWrite alias");
+    assert.equal(
+      opus?.pricing?.cacheWrite,
+      6.25,
+      "cache_creation → cacheWrite alias",
+    );
     const opusBare = map.get("claude-opus-4-7");
     assert.ok(opusBare, "bare id entry present (collision-avoidance)");
     assert.equal(opusBare?.name, "Claude Opus 4.7");
@@ -697,7 +793,11 @@ test("defaultOmniRouteEnrichmentFetcher: merges names from /api/pricing/models a
     assert.equal(sonnet?.name, "Claude 4.6 Sonnet");
     assert.equal(sonnet?.pricing?.input, 3);
     assert.equal(sonnet?.pricing?.output, 15);
-    assert.equal(sonnet?.pricing?.cacheRead, undefined, "no cached key → no cacheRead");
+    assert.equal(
+      sonnet?.pricing?.cacheRead,
+      undefined,
+      "no cached key → no cacheRead",
+    );
   } finally {
     globalThis.fetch = origFetch;
   }
@@ -706,22 +806,35 @@ test("defaultOmniRouteEnrichmentFetcher: merges names from /api/pricing/models a
 test("defaultOmniRouteEnrichmentFetcher: name-only when pricing endpoint 5xxs", async () => {
   const origFetch = globalThis.fetch;
   globalThis.fetch = (async (input: unknown) => {
-    const url = typeof input === "string" ? input : (input as { url: string }).url;
+    const url =
+      typeof input === "string" ? input : (input as { url: string }).url;
     if (url.endsWith("/api/pricing/models")) {
       return new Response(
         JSON.stringify({
-          cc: { models: [{ id: "claude-opus-4-7", name: "Claude Opus 4.7", custom: false }] },
+          cc: {
+            models: [
+              { id: "claude-opus-4-7", name: "Claude Opus 4.7", custom: false },
+            ],
+          },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
     return new Response("boom", { status: 500 });
   }) as typeof fetch;
   try {
-    const map = await defaultOmniRouteEnrichmentFetcher("https://or.example.com", "sk-test", 5_000);
+    const map = await defaultOmniRouteEnrichmentFetcher(
+      "https://or.example.com",
+      "sk-test",
+      5_000,
+    );
     const opus = map.get("cc/claude-opus-4-7");
     assert.equal(opus?.name, "Claude Opus 4.7", "name still present");
-    assert.equal(opus?.pricing, undefined, "no pricing when /api/pricing fails");
+    assert.equal(
+      opus?.pricing,
+      undefined,
+      "no pricing when /api/pricing fails",
+    );
   } finally {
     globalThis.fetch = origFetch;
   }
@@ -730,17 +843,25 @@ test("defaultOmniRouteEnrichmentFetcher: name-only when pricing endpoint 5xxs", 
 test("defaultOmniRouteEnrichmentFetcher: pricing-only when catalog endpoint 5xxs", async () => {
   const origFetch = globalThis.fetch;
   globalThis.fetch = (async (input: unknown) => {
-    const url = typeof input === "string" ? input : (input as { url: string }).url;
+    const url =
+      typeof input === "string" ? input : (input as { url: string }).url;
     if (url.endsWith("/api/pricing")) {
-      return new Response(JSON.stringify({ cc: { "claude-opus-4-7": { input: 5, output: 25 } } }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ cc: { "claude-opus-4-7": { input: 5, output: 25 } } }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
     return new Response("boom", { status: 500 });
   }) as typeof fetch;
   try {
-    const map = await defaultOmniRouteEnrichmentFetcher("https://or.example.com", "sk-test", 5_000);
+    const map = await defaultOmniRouteEnrichmentFetcher(
+      "https://or.example.com",
+      "sk-test",
+      5_000,
+    );
     const opus = map.get("cc/claude-opus-4-7");
     assert.equal(opus?.pricing?.input, 5);
     assert.equal(opus?.pricing?.output, 25);
@@ -761,7 +882,7 @@ function makeEnrichmentMap(
     providerAlias?: string;
     providerCanonical?: string;
     providerDisplayName?: string;
-  }>
+  }>,
 ): OmniRouteEnrichmentMap {
   const map: OmniRouteEnrichmentMap = new Map();
   for (const e of entries) {
@@ -777,7 +898,11 @@ function makeEnrichmentMap(
 
 test("buildCanonicalToAliasMap: maps canonical → alias when both present and distinct", () => {
   const map = makeEnrichmentMap([
-    { key: "cc/claude-opus-4-7", providerAlias: "cc", providerCanonical: "claude" },
+    {
+      key: "cc/claude-opus-4-7",
+      providerAlias: "cc",
+      providerCanonical: "claude",
+    },
     { key: "cx/gpt-5.5", providerAlias: "cx", providerCanonical: "codex" },
   ]);
   const c2a = buildCanonicalToAliasMap(map);
@@ -788,8 +913,16 @@ test("buildCanonicalToAliasMap: maps canonical → alias when both present and d
 
 test("buildCanonicalToAliasMap: skips entries where alias === canonical (e.g. kiro)", () => {
   const map = makeEnrichmentMap([
-    { key: "kiro/claude-sonnet-4", providerAlias: "kiro", providerCanonical: "kiro" },
-    { key: "cc/claude-opus-4-7", providerAlias: "cc", providerCanonical: "claude" },
+    {
+      key: "kiro/claude-sonnet-4",
+      providerAlias: "kiro",
+      providerCanonical: "kiro",
+    },
+    {
+      key: "cc/claude-opus-4-7",
+      providerAlias: "cc",
+      providerCanonical: "claude",
+    },
   ]);
   const c2a = buildCanonicalToAliasMap(map);
   assert.equal(c2a.has("kiro"), false);
@@ -805,15 +938,25 @@ test("buildCanonicalToAliasMap: undefined enrichment → empty map", () => {
 test("buildCanonicalToAliasMap: first-wins on duplicate canonical", () => {
   // Two aliases claiming same canonical — first registration wins.
   const map = makeEnrichmentMap([
-    { key: "cc/claude-opus-4-7", providerAlias: "cc", providerCanonical: "claude" },
-    { key: "anthropic/claude-opus-4-7", providerAlias: "anthropic", providerCanonical: "claude" },
+    {
+      key: "cc/claude-opus-4-7",
+      providerAlias: "cc",
+      providerCanonical: "claude",
+    },
+    {
+      key: "anthropic/claude-opus-4-7",
+      providerAlias: "anthropic",
+      providerCanonical: "claude",
+    },
   ]);
   const c2a = buildCanonicalToAliasMap(map);
   assert.equal(c2a.get("claude"), "cc");
 });
 
 test("lookupEnrichment: direct hit", () => {
-  const map = makeEnrichmentMap([{ key: "cc/claude-opus-4-7", name: "Claude Opus 4.7" }]);
+  const map = makeEnrichmentMap([
+    { key: "cc/claude-opus-4-7", name: "Claude Opus 4.7" },
+  ]);
   const c2a = buildCanonicalToAliasMap(map);
   const hit = lookupEnrichment("cc/claude-opus-4-7", map, c2a);
   assert.equal(hit?.name, "Claude Opus 4.7");
@@ -850,7 +993,9 @@ test("lookupEnrichment: short-alias (e.g. dg/nova-3) → bare-id fallback hits",
 });
 
 test("lookupEnrichment: nothing matches → undefined", () => {
-  const map = makeEnrichmentMap([{ key: "cc/claude-opus-4-7", name: "Claude Opus 4.7" }]);
+  const map = makeEnrichmentMap([
+    { key: "cc/claude-opus-4-7", name: "Claude Opus 4.7" },
+  ]);
   const c2a = buildCanonicalToAliasMap(map);
   const hit = lookupEnrichment("qoder/unknown-model", map, c2a);
   assert.equal(hit, undefined);
@@ -864,7 +1009,11 @@ test("lookupEnrichment: undefined enrichment map → undefined", () => {
 
 test("canonicalDedupSet: drops canonical row when alias twin present", () => {
   const map = makeEnrichmentMap([
-    { key: "cc/claude-opus-4-7", providerAlias: "cc", providerCanonical: "claude" },
+    {
+      key: "cc/claude-opus-4-7",
+      providerAlias: "cc",
+      providerCanonical: "claude",
+    },
   ]);
   const c2a = buildCanonicalToAliasMap(map);
   const raw: OmniRouteRawModelEntry[] = [
@@ -881,7 +1030,11 @@ test("canonicalDedupSet: keeps standalone canonical row (no alias twin) — neve
   // Only canonical row present, no alias twin. Must NOT drop — otherwise
   // we'd hide the model entirely from the catalog.
   const map = makeEnrichmentMap([
-    { key: "cc/claude-opus-4-7", providerAlias: "cc", providerCanonical: "claude" },
+    {
+      key: "cc/claude-opus-4-7",
+      providerAlias: "cc",
+      providerCanonical: "claude",
+    },
   ]);
   const c2a = buildCanonicalToAliasMap(map);
   const raw: OmniRouteRawModelEntry[] = [
@@ -902,9 +1055,17 @@ test("canonicalDedupSet: no enrichment / empty canonicalToAlias → no drops", (
 
 test("canonicalDedupSet: multi-provider — drops all canonical twins where alias exists", () => {
   const map = makeEnrichmentMap([
-    { key: "cc/claude-opus-4-7", providerAlias: "cc", providerCanonical: "claude" },
+    {
+      key: "cc/claude-opus-4-7",
+      providerAlias: "cc",
+      providerCanonical: "claude",
+    },
     { key: "cx/gpt-5.5", providerAlias: "cx", providerCanonical: "codex" },
-    { key: "pol/openai-large", providerAlias: "pol", providerCanonical: "pollinations" },
+    {
+      key: "pol/openai-large",
+      providerAlias: "pol",
+      providerCanonical: "pollinations",
+    },
   ]);
   const c2a = buildCanonicalToAliasMap(map);
   const raw: OmniRouteRawModelEntry[] = [
@@ -969,7 +1130,9 @@ test("buildAliasIndex: upgrades to first entry with non-empty providerDisplayNam
 });
 
 test("buildAliasIndex: skips entries with no providerAlias", () => {
-  const map = makeEnrichmentMap([{ key: "orphan", providerCanonical: "something" }]);
+  const map = makeEnrichmentMap([
+    { key: "orphan", providerCanonical: "something" },
+  ]);
   assert.equal(buildAliasIndex(map).size, 0);
 });
 
@@ -997,7 +1160,11 @@ test("resolveProviderTagEntry: no direct, alias matches → synthesised entry fr
     },
   ]);
   const idx = buildAliasIndex(map);
-  const out = resolveProviderTagEntry("cohere/rerank-multilingual-v3.0", undefined, idx);
+  const out = resolveProviderTagEntry(
+    "cohere/rerank-multilingual-v3.0",
+    undefined,
+    idx,
+  );
   assert.equal(out?.providerAlias, "cohere");
   assert.equal(out?.providerDisplayName, "Cohere");
   // Crucially: synthesised entry must NOT carry the slot's name (would
@@ -1019,7 +1186,12 @@ test("resolveProviderTagEntry: canonical prefix → alias fallback (pollinations
   ]);
   const idx = buildAliasIndex(map);
   const c2a = buildCanonicalToAliasMap(map);
-  const out = resolveProviderTagEntry("pollinations/klein", undefined, idx, c2a);
+  const out = resolveProviderTagEntry(
+    "pollinations/klein",
+    undefined,
+    idx,
+    c2a,
+  );
   assert.equal(out?.providerAlias, "pol");
   assert.equal(out?.providerCanonical, "pollinations");
   assert.equal(out?.providerDisplayName, "Pollinations");
@@ -1041,7 +1213,11 @@ test("resolveProviderTagEntry: prefix unknown to alias index → returns direct 
     },
   ]);
   const idx = buildAliasIndex(map);
-  const out = resolveProviderTagEntry("unknownprovider/some-model", undefined, idx);
+  const out = resolveProviderTagEntry(
+    "unknownprovider/some-model",
+    undefined,
+    idx,
+  );
   assert.equal(out, undefined);
 });
 
