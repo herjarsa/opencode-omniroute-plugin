@@ -29,22 +29,18 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-# ── 2. unlock bitwarden ─────────────────────────────────────────────────────
-BW_STATUS=$(bw status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','locked'))" 2>/dev/null || echo "locked")
-echo "  vault status: $BW_STATUS"
-
-if [[ "$BW_STATUS" == "unauthenticated" ]]; then
-  echo "→ logging in to Bitwarden"
-  bw login
-  BW_SESSION=$(bw unlock --raw)
-  export BW_SESSION
-elif [[ "$BW_STATUS" == "locked" ]]; then
-  echo "→ unlocking Bitwarden vault (Touch ID or master password)"
-  BW_SESSION=$(bw unlock --raw </dev/tty)
-  export BW_SESSION
-else
-  echo "✓ vault already unlocked"
+# ── 2. check bitwarden session ──────────────────────────────────────────────
+# If BW_SESSION is already exported in the calling shell, it will be inherited.
+# If not, bw will attempt to use the desktop app's keychain session.
+# To unlock manually before running: eval $(bw unlock --raw) && export BW_SESSION
+echo "→ checking Bitwarden access"
+if ! bw get item "npmjs.com" &>/dev/null; then
+  echo "✗ Bitwarden vault is locked or item not found"
+  echo "  run: export BW_SESSION=\$(bw unlock --raw)"
+  echo "  then re-run: bash scripts/release.sh $BUMP"
+  exit 1
 fi
+echo "✓ Bitwarden accessible"
 
 # ── 3. fetch npm token ───────────────────────────────────────────────────────
 echo "→ fetching npm token from Bitwarden"
