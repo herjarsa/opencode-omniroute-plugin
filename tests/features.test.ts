@@ -166,7 +166,7 @@ const BASE = "https://or.example.com";
 test("resolveApiBlock: cc/ prefix → anthropic", () => {
   const b = resolveApiBlock("cc/claude-sonnet-4-6", BASE);
   assert.equal(b.id, "anthropic");
-  assert.equal(b.url, BASE);
+  assert.equal(b.url, `${BASE}/v1`);
   assert.equal(b.npm, "@ai-sdk/anthropic");
 });
 test("resolveApiBlock: claude/ prefix → anthropic", () => {

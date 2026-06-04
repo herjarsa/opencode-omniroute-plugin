@@ -226,8 +226,7 @@ export const DEFAULT_ANTHROPIC_PREFIXES = [
  * active `apiFormat` feature config.
  *
  * - Models whose prefix (before the first `/`) is in `anthropicPrefixes` →
- *   `{ id: "anthropic", url: baseURL, npm: "@ai-sdk/anthropic" }`
- *   The Anthropic SDK appends `/v1/messages` automatically.
+ *   `{ id: "anthropic", url: baseURL/v1, npm: "@ai-sdk/anthropic" }`
  *
  * - All others →
  *   `{ id: "openai-compatible", url: baseURL/v1, npm: "@ai-sdk/openai-compatible" }`
@@ -244,7 +243,7 @@ export function resolveApiBlock(
   return isAnthropic
     ? {
         id: "anthropic",
-        url: trimTrailingSlashes(baseURL),
+        url: ensureV1Suffix(baseURL),
         npm: "@ai-sdk/anthropic",
       }
     : {
@@ -443,9 +442,13 @@ export function createOmniRouteAuthHook(
             wantDebugLog,
           );
         }
+        // OpenCode's plugin SDK always uses @ai-sdk/openai-compatible which
+        // constructs URLs as ${baseURL}${path}. The path is /chat/completions,
+        // so baseURL MUST include /v1 to produce /v1/chat/completions.
+        const sdkBaseURL = ensureV1Suffix(resolvedBaseURL);
         return composedFetch
-          ? { apiKey, baseURL: resolvedBaseURL, fetch: composedFetch }
-          : { apiKey, baseURL: resolvedBaseURL };
+          ? { apiKey, baseURL: sdkBaseURL, fetch: composedFetch }
+          : { apiKey, baseURL: sdkBaseURL };
       }
       return {};
     },
