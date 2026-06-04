@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-set -euo pipefail
+set -euo pipefail 2>/dev/null || setopt ERR_EXIT PIPE_FAIL NO_UNSET
 
 # ---------------------------------------------------------------------------
 # release.sh — build, test, publish to npm, tag + push
@@ -17,7 +17,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 BUMP=${1:-patch}
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${(%):-%x}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # ── 1. preflight ────────────────────────────────────────────────────────────
