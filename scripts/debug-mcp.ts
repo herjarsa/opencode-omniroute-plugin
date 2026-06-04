@@ -23,16 +23,95 @@
  *   omniroute_debug_clear    — wipe the log file
  */
 
-import {
-  debugLogEnabled,
-  debugLogSetEnabled,
-  debugLogRead,
-  debugLogGetById,
-  debugLogClear,
-} from "../src/index.js";
 import { homedir } from "os";
-import { existsSync, statSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
+
+interface DebugLogEntry {
+  reqId: string;
+  providerId: string;
+  ts: number;
+  url: string;
+  method: string;
+  reqHeaders: Record<string, string>;
+  reqBody: unknown;
+  resStatus: number | null;
+  resHeaders: Record<string, string>;
+  resBody: unknown;
+  durationMs: number | null;
+  error?: string;
+}
+
+function debugLogDir(): string {
+  const dir = join(homedir(), ".local", "share", "opencode", "plugins");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function debugLogPath(pid: string) {
+  return join(debugLogDir(), `omniroute-debug-${pid}.jsonl`);
+}
+function debugStatePath(pid: string) {
+  return join(debugLogDir(), `omniroute-debug-${pid}.state.json`);
+}
+
+function debugLogEnabled(pid: string): boolean {
+  try {
+    return (
+      (
+        JSON.parse(readFileSync(debugStatePath(pid), "utf8")) as {
+          enabled?: boolean;
+        }
+      ).enabled === true
+    );
+  } catch {
+    return false;
+  }
+}
+function debugLogSetEnabled(pid: string, enabled: boolean) {
+  writeFileSync(debugStatePath(pid), JSON.stringify({ enabled }), "utf8");
+}
+function debugLogRead(pid: string, limit = 20): DebugLogEntry[] {
+  const p = debugLogPath(pid);
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .slice(-limit)
+    .map((l) => {
+      try {
+        return JSON.parse(l) as DebugLogEntry;
+      } catch {
+        return null;
+      }
+    })
+    .filter((e): e is DebugLogEntry => e !== null);
+}
+function debugLogGetById(pid: string, reqId: string): DebugLogEntry | null {
+  const p = debugLogPath(pid);
+  if (!existsSync(p)) return null;
+  const lines = readFileSync(p, "utf8").trim().split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const e = JSON.parse(lines[i]) as DebugLogEntry;
+      if (e.reqId === reqId) return e;
+    } catch {
+      /**/
+    }
+  }
+  return null;
+}
+function debugLogClear(pid: string) {
+  const p = debugLogPath(pid);
+  if (existsSync(p)) writeFileSync(p, "", "utf8");
+}
 
 // ── CLI args ────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -208,12 +287,12 @@ process.stdin.on("data", (chunk: string) => {
           capabilities: { tools: {} },
           serverInfo: { name: "omniroute-debug", version: "0.1.0" },
         });
-        return;
+        continue;
       }
 
       if (msg.method === "tools/list") {
         respond(msg.id, { tools });
-        return;
+        continue;
       }
 
       if (msg.method === "tools/call") {
@@ -225,10 +304,10 @@ process.stdin.on("data", (chunk: string) => {
         respond(msg.id, {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         });
-        return;
+        continue;
       }
 
-      if (msg.method === "notifications/initialized") return;
+      if (msg.method === "notifications/initialized") continue;
 
       respond(msg.id, null, {
         code: -32601,
