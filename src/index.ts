@@ -1437,6 +1437,64 @@ export const defaultOmniRouteEnrichmentFetcher: OmniRouteEnrichmentFetcher =
       clearTimeout(priceTimer);
     }
 
+    // ── 3. Free model budgets from /api/free-models ────────────────────────
+    // Best-effort fetch: populates freeType/monthlyTokens/creditTokens on
+    // enrichment entries that match. 404 = endpoint doesn't exist yet — skip.
+    const freeAc = new AbortController();
+    const freeTimer = setTimeout(() => freeAc.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${root}/api/free-models`, {
+        method: "GET",
+        headers,
+        signal: freeAc.signal,
+      });
+      if (res.ok) {
+        const body = (await res.json()) as unknown;
+        // Accept both {models:[...]} envelope and bare array
+        const freeModels: unknown[] = Array.isArray(body)
+          ? body
+          : body &&
+              typeof body === "object" &&
+              Array.isArray((body as { models?: unknown }).models)
+            ? ((body as { models: unknown[] }).models as unknown[])
+            : [];
+        for (const fm of freeModels) {
+          if (!fm || typeof fm !== "object") continue;
+          const fmObj = fm as Record<string, unknown>;
+          const provider =
+            typeof fmObj.provider === "string" ? fmObj.provider : "";
+          const modelId =
+            typeof fmObj.modelId === "string" ? fmObj.modelId : "";
+          const freeType =
+            typeof fmObj.freeType === "string" ? fmObj.freeType : "";
+          if (!modelId || !freeType) continue;
+          const monthlyTokens =
+            typeof fmObj.monthlyTokens === "number"
+              ? fmObj.monthlyTokens
+              : undefined;
+          const creditTokens =
+            typeof fmObj.creditTokens === "number"
+              ? fmObj.creditTokens
+              : undefined;
+          // Match against existing enrichment entries (namespaced and bare)
+          const candidates = [`${provider}/${modelId}`, modelId];
+          for (const key of candidates) {
+            const entry = out.get(key);
+            if (entry) {
+              entry.freeType = freeType as FreeModelFreeType;
+              if (monthlyTokens !== undefined)
+                entry.monthlyTokens = monthlyTokens;
+              if (creditTokens !== undefined) entry.creditTokens = creditTokens;
+            }
+          }
+        }
+      }
+    } catch {
+      // Soft-fail; free metadata is optional.
+    } finally {
+      clearTimeout(freeTimer);
+    }
+
     return out;
   };
 
@@ -1736,8 +1794,13 @@ export function applyEnrichment(
   if (!enrichment) return model;
   if (enrichment.name && enrichment.name.trim().length > 0) {
     model.name = _normaliseFreeLabel(enrichment.name);
-    // Append free budget suffix when free model data is available
+    // Append free budget suffix when free model data is available.
+    // Ensure [Free] prefix is present when freeType is set, even if the
+    // curated name didn't contain a "(Free)" suffix for normaliseFreeLabel.
     if (enrichment.freeType) {
+      if (!model.name.startsWith("[Free]")) {
+        model.name = `[Free] ${model.name}`;
+      }
       const budget = formatFreeBudget({
         freeType: enrichment.freeType,
         monthlyTokens: enrichment.monthlyTokens,
@@ -2648,6 +2711,64 @@ export function createOmniRouteProviderHook(
           }
         }
         models[comboKey] = mapped;
+      }
+
+      // ── Auto combos in dynamic catalog ────────────────────────────────
+      // Convert virtual auto combos from /api/combos/auto into ModelV2
+      // entries so they appear in the dynamic provider.models() path
+      // (used by OpenCode ≥1.14.49).
+      if (rawAutoCombos.length > 0) {
+        for (const autoCombo of rawAutoCombos) {
+          if (!autoCombo || !autoCombo.id) continue;
+          if (autoCombo.isHidden === true) continue;
+          const entry = mapAutoComboToStaticEntry(autoCombo);
+          const key = autoComboModelId(autoCombo.variant);
+          const mapped: ModelV2 = {
+            id: key,
+            name: entry.name,
+            capabilities: {
+              temperature: entry.temperature ?? true,
+              reasoning: entry.reasoning ?? false,
+              attachment: entry.attachment ?? false,
+              toolcall: entry.tool_call ?? false,
+              input: {
+                text: true,
+                audio: false,
+                image: false,
+                video: false,
+                pdf: false,
+              },
+              output: {
+                text: true,
+                audio: false,
+                image: false,
+                video: false,
+                pdf: false,
+              },
+              interleaved: false,
+            },
+            cost: {
+              input: 0,
+              output: 0,
+              cache: { read: 0, write: 0 },
+            },
+            limit: {
+              context: entry.limit?.context ?? 0,
+              output: entry.limit?.output ?? 0,
+            },
+            api: {
+              id: "openai-compatible",
+              url: baseURL,
+              npm: "@ai-sdk/openai-compatible",
+            },
+            status: "active",
+            release_date: "",
+            providerID: resolved.providerId,
+            options: {},
+            headers: {},
+          };
+          models[key] = mapped;
+        }
       }
 
       return models;
