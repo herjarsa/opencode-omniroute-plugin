@@ -295,11 +295,11 @@ test("applyProviderTag: providerDisplayName too long → falls back to UPPER(ali
   assert.equal(m.name, "GHM - GPT 5");
 });
 
-test("applyProviderTag: long displayName + no alias → uses long label rather than dropping prefix", () => {
+test("applyProviderTag: long displayName + no alias → drops prefix (returns undefined)", () => {
   const m = baseModel();
   m.name = "GPT 5";
   applyProviderTag(m as never, { providerDisplayName: "GitHub Models" });
-  assert.equal(m.name, "GitHub Models - GPT 5");
+  assert.equal(m.name, "GPT 5");
 });
 
 test("applyProviderTag: only providerAlias known → UPPER(alias) prefix", () => {
