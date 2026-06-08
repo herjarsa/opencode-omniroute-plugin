@@ -1,0 +1,6 @@
+# mise.toml — Plugin dev runtime contract.
+# `mise install` once, then `mise run <task>`.
+
+[tools]
+node = "22"            # plugin runtime target (node22 in tsup.config)
+bun = "latest"         # test runner (bun --test)

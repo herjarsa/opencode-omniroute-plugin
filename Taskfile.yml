@@ -1,0 +1,103 @@
+# https://taskfile.dev
+version: "3"
+
+vars:
+  PLUGIN_DIST: dist/index.js
+  PLUGIN_SRC: src/index.ts
+  OC_CONFIG: ~/.config/opencode/opencode.jsonc
+  CANONICAL_PATH: /Users/mourad.maatoug/code/public/github.com/diegosouzapw/OmniRoute/@omniroute/opencode-plugin
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build plugin (esm + cjs + dts)
+    cmds:
+      - npm run build
+    sources:
+      - src/**/*.ts
+    generates:
+      - dist/index.js
+      - dist/index.cjs
+      - dist/index.d.ts
+
+  clean:
+    desc: Remove dist/
+    cmds:
+      - rm -rf dist
+
+  test:
+    desc: Run tests via bun
+    cmds:
+      - npx bun test tests/
+
+  typecheck:
+    desc: Type-check without emit
+    cmds:
+      - npx tsc --noEmit
+
+  deploy-local:
+    desc: Build + verify OpenCode picks up changes (config already points to dist/)
+    deps: [build, typecheck]
+    cmds:
+      - |
+        echo "✓ Built: $(ls -lh dist/index.js | awk '{print $5}')"
+        echo "✓ Config path: $(grep -o '"[^"]*dist/index.js"' {{.OC_CONFIG}} | head -1)"
+        echo "✓ Restart OpenCode to pick up changes"
+
+  deploy-link:
+    desc: Symlink plugin dist into a global node_modules for npm-style imports
+    deps: [build]
+    cmds:
+      - |
+        LINK_DIR="$HOME/.local/lib/opencode-plugins/mrmm-omniroute-plugin"
+        mkdir -p "$(dirname "$LINK_DIR")"
+        rm -rf "$LINK_DIR"
+        ln -s "$(pwd)" "$LINK_DIR"
+        echo "✓ Linked: $LINK_DIR → $(pwd)"
+
+  sync-upstream:
+    desc: Sync naming.ts + auto-combo changes from fork → canonical @omniroute/opencode-plugin
+    deps: [build]
+    vars:
+      SRC: .
+      DST: "{{.CANONICAL_PATH}}"
+    cmds:
+      - |
+        echo "Syncing to canonical plugin at {{.DST}}"
+        # 1. Copy naming.ts (new file)
+        cp {{.SRC}}/src/naming.ts {{.DST}}/src/naming.ts
+        echo "  ✓ naming.ts copied"
+        # 2. Copy index.ts (modified)
+        cp {{.SRC}}/src/index.ts {{.DST}}/src/index.ts
+        echo "  ✓ index.ts copied"
+        # 3. Copy dist for reference
+        cp {{.SRC}}/dist/index.js {{.DST}}/dist/index.js
+        cp {{.SRC}}/dist/index.cjs {{.DST}}/dist/index.cjs
+        echo "  ✓ dist copied"
+        # 4. Verify canonical builds
+        cd {{.DST}} && npx tsc --noEmit && echo "  ✓ canonical typecheck pass"
+        cd {{.DST}} && npm run build && echo "  ✓ canonical build pass"
+        echo ""
+        echo "Next: cd {{.DST}} && git diff && git commit"
+
+  sync-check:
+    desc: Diff fork vs canonical to see what's out of sync
+    vars:
+      SRC: .
+      DST: "{{.CANONICAL_PATH}}"
+    cmds:
+      - |
+        echo "=== naming.ts ==="
+        diff --color {{.SRC}}/src/naming.ts {{.DST}}/src/naming.ts 2>/dev/null || echo "(new file — not in canonical yet)"
+        echo ""
+        echo "=== index.ts ==="
+        diff --color {{.SRC}}/src/index.ts {{.DST}}/src/index.ts | head -60 || true
+
+  version:
+    desc: Show current plugin version
+    cmds:
+      - node -p "require('./package.json').version"
