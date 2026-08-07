@@ -100,18 +100,18 @@ test("#6859: createOmniRouteProviderHook end-to-end — catalog keys/providerID 
   );
 });
 
-// #7976: buildStaticProviderEntry (the STATIC provider() config-hook path,
-// exercised when the plugin writes `opencode.json` up front rather than
-// registering the dynamic `provider.models()` hook) never received the
-// #6859 fix. OC dispatches a static-catalog `models` map key verbatim as
-// the `model` field of the outbound request — only the top-level
-// `provider["<id>"]` segment is stripped for routing — so a bare-slug combo
-// key built with the OC-gated `providerId` reaches OmniRoute's server
-// doubled and fails credential lookup for the nonexistent provider
-// `opencode-omniroute`. Confirmed against the issue's own curl repro
-// (`model: "opencode-omniroute/hermes-smart-stack"` → "No active
-// credentials for provider: opencode-omniroute").
-test("#7976: buildStaticProviderEntry keys bare-slug combo ids with the unprefixed omnirouteProviderId (no double OC-gate prefix)", () => {
+// #9175/#9178: buildStaticProviderEntry (the STATIC provider() config-hook
+// path, exercised when the plugin writes `opencode.json` up front rather than
+// registering the dynamic `provider.models()` hook) must key user combos
+// under their BARE slug. OC's `getModel` looks up models by bare id (the
+// part after the first slash of the user's request), so any provider prefix
+// (`omniroute/<slug>` or the OC-gate `opencode-omniroute/<slug>`) made the
+// combo unreachable — the request reached OmniRoute's server with the
+// prefix attached and `parseModel()` resolved credentials for the
+// nonexistent provider. Confirmed against the issue's own curl repro
+// (`model: "omniroute/hermes-smart-stack"` → "No active credentials for
+// provider: omniroute").
+test("#9178: buildStaticProviderEntry keys user combos by bare slug (no provider prefix)", () => {
   const resolved = resolveOmniRoutePluginOptions({ providerId: "omniroute" });
   assert.equal(resolved.providerId, "opencode-omniroute");
   assert.equal(resolved.omnirouteProviderId, "omniroute");
@@ -131,11 +131,20 @@ test("#7976: buildStaticProviderEntry keys bare-slug combo ids with the unprefix
     "sk-test"
   );
 
-  assert.deepEqual(Object.keys(block.models), ["omniroute/hermes-smart-stack"]);
+  assert.deepEqual(Object.keys(block.models), ["hermes-smart-stack"]);
+  assert.ok(
+    block.models["hermes-smart-stack"],
+    "combo must be reachable under its bare slug key"
+  );
+  assert.equal(
+    block.models["omniroute/hermes-smart-stack"],
+    undefined,
+    "combo key must not carry any provider prefix — a prefixed key makes the " +
+      "combo unreachable (getModel resolves by bare id)"
+  );
   assert.equal(
     block.models["opencode-omniroute/hermes-smart-stack"],
     undefined,
-    "combo key must not carry the OC-gate-prefixed providerId — it doubles up once " +
-      "OC dispatches it verbatim as the `model` field"
+    "combo key must not carry the OC-gate-prefixed providerId either"
   );
 });

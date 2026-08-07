@@ -4278,12 +4278,14 @@ export function buildStaticProviderEntry(
       entry.release_date = raw.release_date;
     }
 
-    // OC's static-catalog reader parses each key on `/` and rejects the
-    // entire provider block if ANY key resolves to a parsed providerID that
-    // has no corresponding provider block. So bare keys (no `/`) MUST be
-    // prefixed with the resolved providerId. Already-prefixed keys
-    // (e.g. `cc/claude-opus-4-7`) are left as-is to avoid double-prefixing.
-    models[raw.id.includes("/") ? raw.id : `${opts.providerId}/${raw.id}`] = entry;
+    // #9175/#9178: keys MUST be the bare model id. OC's `getModel` looks up
+    // models by the part after the first slash of the user's request, so a
+    // prefixed key (`opencode-omniroute/<raw-id>`) made non-slashed raw
+    // models unreachable — the request reached OmniRoute's server with the
+    // prefix still attached and `parseModel()` resolved credentials for the
+    // nonexistent provider. Slashed ids (`cc/claude-opus-4-7`) are already
+    // bare and stay as-is.
+    models[raw.id] = entry;
   }
 
   // Combo entries → stripped LCD shape. Each combo is keyed as
@@ -4490,21 +4492,17 @@ export function buildStaticProviderEntry(
         entry.tool_call = false;
       }
 
-      // Key under bare slug (e.g. `claude-primary`) — no `combo/` prefix
-      // because OpenCode parses model IDs on `/` and would treat
-      // `combo/MASTER` as provider=`combo`. Slug collisions across
-      // combos are disambiguated with a short UUID-prefix suffix; see
-      // `buildComboKey` for the policy.
-      // #6859: server-facing key — NOT the OC-gate-prefixed `opts.providerId`.
-      // OC dispatches the static-catalog `models` map key VERBATIM as the
-      // `model` field of the outbound `@ai-sdk/openai-compatible` request
-      // (only the top-level `provider["<id>"]` segment is stripped for
-      // routing) — so a bare-slug combo key prefixed with the OC-gated
-      // `opts.providerId` reaches OmniRoute's server doubled
-      // (`opencode-omniroute/opencode-omniroute/<slug>`), and `parseModel()`
-      // resolves credentials for the nonexistent provider `opencode-omniroute`
-      // instead of `omniroute`. See #7976.
-      models[buildComboKey(combo, usedComboKeys, opts.omnirouteProviderId)] = entry;
+      // #9175/#9178: key under the bare slug (e.g. `claude-primary`) — no
+      // `combo/` prefix (OpenCode parses model IDs on `/` and would treat
+      // `combo/MASTER` as provider=`combo`) and no `omniroute/` provider
+      // prefix either: OC's `getModel` looks up combos by bare id, and a
+      // prefixed key reached OmniRoute's server as `omniroute/<slug>` where
+      // `parseModel()` resolved credentials for the nonexistent provider
+      // `omniroute` → 404. Slug collisions across combos are disambiguated
+      // with a short UUID-prefix suffix; see `buildComboKey` for the policy.
+      // See #6859/#7976 for the double-prefix history.
+      models[buildComboKey(combo, usedComboKeys, opts.omnirouteProviderId).split("/").pop()!] =
+        entry;
 
       // Make this combo's resolved entry available to parent combos
       // that reference it via combo-ref. Use the friendly name since
