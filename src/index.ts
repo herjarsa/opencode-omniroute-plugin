@@ -1716,6 +1716,16 @@ const AUTO_COMBO_FALLBACK_CONTEXT = 128_000;
 const AUTO_COMBO_FALLBACK_OUTPUT = 8_192;
 
 /**
+ * Conservative `output` fallback for the static catalog when the upstream
+ * runtime exposes `context_length` but not `max_output_tokens` (common:
+ * OmniRoute 3.8.49 exposes output for only 159/762 models). OpenCode's
+ * static-catalog schema requires BOTH `context` and `output` when `limit`
+ * is present, so the fork derives `output` = min(context, this fallback)
+ * instead of dropping `limit` (which made OC report context 0).
+ */
+export const FALLBACK_OUTPUT_TOKENS = AUTO_COMBO_FALLBACK_OUTPUT;
+
+/**
  * Convert a raw auto combo into a static model entry for the OpenCode picker.
  * Auto combos have tool_call=true, reasoning=true by default (they route
  * to capable models). Context/output limits come from the server (MAX of
@@ -4222,17 +4232,19 @@ export function buildStaticProviderEntry(
 
     // OC's SDK schema requires BOTH `context` and `output` when `limit` is
     // present. We previously emitted `limit.input` too, but the SDK reader
-    // doesn't accept it — drop it. Only emit `limit` when both required
-    // values are known.
-    if (
-      typeof raw.context_length === "number" &&
-      raw.context_length > 0 &&
-      typeof raw.max_output_tokens === "number" &&
-      raw.max_output_tokens > 0
-    ) {
+    // doesn't accept it — drop it. Fork policy: emit `limit` whenever
+    // `context_length` is known (the value OpenCode displays); when the
+    // upstream omits `max_output_tokens`, derive `output` from
+    // FALLBACK_OUTPUT_TOKENS instead of dropping `limit` (which made
+    // OpenCode report context 0 for 321/434 catalog models).
+    if (typeof raw.context_length === "number" && raw.context_length > 0) {
+      const output =
+        typeof raw.max_output_tokens === "number" && raw.max_output_tokens > 0
+          ? raw.max_output_tokens
+          : Math.min(raw.context_length, FALLBACK_OUTPUT_TOKENS);
       entry.limit = {
         context: raw.context_length,
-        output: raw.max_output_tokens,
+        output,
       };
     }
 
@@ -4387,6 +4399,50 @@ export function buildStaticProviderEntry(
       // provider and the KEY prefix (`omniroute/<slug>`) is what OC parses.
       const entry: OmniRouteStaticModelEntry = { name: displayName };
 
+      // LCD across limits — min over declared values, computed for BOTH
+      // member-resolvable and member-less combos. OC's SDK static schema
+      // accepts only `context` + `output` on `limit`, so we drop the legacy
+      // `input` emission. Fork policy: the combo context is the MIN of the
+      // members' upstream `context_length` (incl. nested combo-refs, which
+      // synthesize members carrying the nested combo's own limit); emit
+      // whenever any member declares context, and derive `output` from
+      // FALLBACK_OUTPUT_TOKENS when no member declares `max_output_tokens`.
+      const contextValues = memberEntries
+        .map((m) => m.context_length)
+        .filter((v): v is number => typeof v === "number" && v > 0);
+      const outputValues = memberEntries
+        .map((m) => m.max_output_tokens)
+        .filter((v): v is number => typeof v === "number" && v > 0);
+
+      // Fork fallback: OmniRoute pre-mirrors combos into /v1/models under
+      // the friendly name (e.g. id "STACK FREE"). When the combo's own
+      // members are NOT resolvable against /v1/models (providers not
+      // surfaced there), the mirror raw entry carries the upstream's own
+      // LCD answer — adopt it instead of emitting no limit at all.
+      if (contextValues.length === 0) {
+        const mirror = rawModelById.get(friendlyName);
+        if (mirror) {
+          if (typeof mirror.context_length === "number" && mirror.context_length > 0) {
+            contextValues.push(mirror.context_length);
+          }
+          if (typeof mirror.max_output_tokens === "number" && mirror.max_output_tokens > 0) {
+            outputValues.push(mirror.max_output_tokens);
+          }
+        }
+      }
+
+      if (contextValues.length > 0) {
+        const comboContext = Math.min(...contextValues);
+        const comboOutput =
+          outputValues.length > 0
+            ? Math.min(...outputValues)
+            : Math.min(comboContext, FALLBACK_OUTPUT_TOKENS);
+        entry.limit = {
+          context: comboContext,
+          output: comboOutput,
+        };
+      }
+
       if (hasMembers) {
         // LCD across capabilities — every member must support for the combo
         // to support. Mirrors mapComboToModelV2.
@@ -4402,24 +4458,6 @@ export function buildStaticProviderEntry(
         entry.tool_call = memberEntries.every((m) =>
           Boolean(m.capabilities?.tool_calling ?? false)
         );
-
-        // LCD across limits — min over declared values. OC's SDK static schema
-        // accepts only `context` + `output` on `limit`, so we drop the legacy
-        // `input` emission. Emit only when BOTH context AND output are known
-        // across at least one member (mirrors the required-field constraint).
-        const contextValues = memberEntries
-          .map((m) => m.context_length)
-          .filter((v): v is number => typeof v === "number" && v > 0);
-        const outputValues = memberEntries
-          .map((m) => m.max_output_tokens)
-          .filter((v): v is number => typeof v === "number" && v > 0);
-
-        if (contextValues.length > 0 && outputValues.length > 0) {
-          entry.limit = {
-            context: Math.min(...contextValues),
-            output: Math.min(...outputValues),
-          };
-        }
 
         // LCD across modalities — combo accepts modality M iff every member
         // accepts M. Same intersection rule as runtime capabilities.
