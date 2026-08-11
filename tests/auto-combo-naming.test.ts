@@ -13,7 +13,8 @@
  *   - "auto/best-chaos"  → "Auto Best Chaos"
  *   - "auto/pro-fast"    → "Auto Pro Fast"
  *   - "auto/coding:fast" → "Auto Coding Fast"
- *   - candidate count appends " (Np)" when present.
+ * No candidate-count suffix — the provider pool size is server-internal
+ * detail, not part of the display name.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -41,18 +42,17 @@ test("formatAutoComboName derives the label from the literal catalog id", () => 
   );
 });
 
-test("formatAutoComboName appends the candidate count", () => {
+test("formatAutoComboName ignores the candidate count", () => {
   assert.equal(
     formatAutoComboName(undefined, 5, "auto/best-chaos"),
-    "Auto Best Chaos (5p)",
+    "Auto Best Chaos",
   );
 });
 
 test("formatAutoComboName falls back to the variant label without a catalog id", () => {
-  assert.equal(formatAutoComboName("coding", 5), "Auto Coding (5p)");
+  assert.equal(formatAutoComboName("coding", 5), "Auto Coding");
   assert.equal(formatAutoComboName(undefined), "Auto Default");
 });
-
 test("mapAutoComboToStaticEntry uses the catalog-derived name", () => {
   const raw = {
     id: "auto/best-chaos",
@@ -60,7 +60,7 @@ test("mapAutoComboToStaticEntry uses the catalog-derived name", () => {
     candidateCount: 5,
   } as OmniRouteRawAutoCombo;
   const entry = mapAutoComboToStaticEntry(raw);
-  assert.equal(entry.name, "Auto Best Chaos (5p)");
+  assert.equal(entry.name, "Auto Best Chaos");
 });
 
 test("autoComboModelId keeps the full catalog id for best-* family", () => {

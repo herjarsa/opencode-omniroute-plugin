@@ -193,11 +193,7 @@ export function formatAutoComboName(
   // `variant` is empty, and the server-side `name` shortens them (e.g.
   // "Auto Chaos" for auto/best-chaos) — never shorten, never invent.
   const label = deriveAutoComboLabel(variant, catalogId);
-  const count =
-    typeof candidateCount === "number" && candidateCount > 0
-      ? ` (${candidateCount}p)`
-      : "";
-  return `Auto ${label}${count}`;
+  return `Auto ${label}`;
 }
 
 /**
