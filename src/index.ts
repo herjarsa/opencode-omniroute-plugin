@@ -1800,7 +1800,11 @@ export function mapAutoComboToStaticEntry(
   autoCombo: OmniRouteRawAutoCombo
 ): OmniRouteStaticModelEntry {
   const variant = autoCombo.variant;
-  const name = formatAutoComboName(variant, autoCombo.candidateCount);
+  const name = formatAutoComboName(
+    variant,
+    autoCombo.candidateCount,
+    autoCombo.id,
+  );
   const context =
     typeof autoCombo.context_length === "number" && autoCombo.context_length > 0
       ? autoCombo.context_length

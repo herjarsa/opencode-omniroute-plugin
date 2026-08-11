@@ -185,15 +185,46 @@ export function formatFreeBudget(params: {
 export function formatAutoComboName(
   variant: AutoVariant | undefined,
   candidateCount?: number,
+  catalogId?: string,
 ): string {
-  const label = variant
-    ? variant.charAt(0).toUpperCase() + variant.slice(1)
-    : "Default";
+  // Prefer deriving the display name from the literal catalog id when one is
+  // present ("auto/best-chaos" → "Auto Best Chaos"). The regenerated catalog
+  // carries full ids for the best-*/pro-*/claude-* families even when
+  // `variant` is empty, and the server-side `name` shortens them (e.g.
+  // "Auto Chaos" for auto/best-chaos) — never shorten, never invent.
+  const label = deriveAutoComboLabel(variant, catalogId);
   const count =
     typeof candidateCount === "number" && candidateCount > 0
       ? ` (${candidateCount}p)`
       : "";
-  return `Auto: ${label}${count}`;
+  return `Auto ${label}${count}`;
+}
+
+/**
+ * Label for an auto combo, derived from the catalog id when available.
+ *
+ * - "auto"             → "Default"
+ * - "auto/coding"      → "Coding"
+ * - "auto/best-chaos"  → "Best Chaos"
+ * - "auto/coding:fast" → "Coding Fast"
+ *
+ * Falls back to the legacy variant-derived label when no catalog id is given.
+ */
+function deriveAutoComboLabel(
+  variant: AutoVariant | undefined,
+  catalogId?: string,
+): string {
+  if (typeof catalogId === "string" && catalogId.startsWith("auto")) {
+    const rest = catalogId === "auto" ? "" : catalogId.slice("auto/".length);
+    if (rest.length === 0) return "Default";
+    return rest
+      .split(/[-:]+/)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ");
+  }
+  return variant
+    ? variant.charAt(0).toUpperCase() + variant.slice(1)
+    : "Default";
 }
 
 /**
@@ -242,6 +273,8 @@ export interface ModelDisplayNameParams {
   autoVariant?: AutoVariant;
   /** Auto combo candidate count. */
   autoCandidateCount?: number;
+  /** Auto combo catalog id (e.g. "auto/best-chaos") to derive the name from. */
+  autoCatalogId?: string;
 }
 
 /**
@@ -260,7 +293,11 @@ export interface ModelDisplayNameParams {
 export function buildModelDisplayName(params: ModelDisplayNameParams): string {
   // Auto combos
   if (params.isAutoCombo) {
-    return formatAutoComboName(params.autoVariant, params.autoCandidateCount);
+    return formatAutoComboName(
+      params.autoVariant,
+      params.autoCandidateCount,
+      params.autoCatalogId,
+    );
   }
 
   // Determine base name — strip any existing free suffix first
