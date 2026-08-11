@@ -199,8 +199,19 @@ export function formatAutoComboName(
 /**
  * Build the model ID for an auto combo entry.
  * "auto/coding", "auto/fast", "auto" (default).
+ *
+ * The regenerated OmniRoute catalog carries the FULL id on the auto combo
+ * (e.g. "auto/best-fast") even when `variant` is empty (the "best-*" family).
+ * Prefer the catalog id when present so those combos keep their real key
+ * instead of collapsing to the bare "auto" default.
  */
-export function autoComboModelId(variant: AutoVariant | undefined): string {
+export function autoComboModelId(
+  variant: AutoVariant | undefined,
+  catalogId?: string,
+): string {
+  if (typeof catalogId === "string" && catalogId.startsWith("auto")) {
+    return catalogId;
+  }
   return variant ? `auto/${variant}` : "auto";
 }
 

@@ -3592,7 +3592,7 @@ export function createOmniRouteProviderHook(
           if (!autoCombo || !autoCombo.id) continue;
           if (autoCombo.isHidden === true) continue;
           const entry = mapAutoComboToStaticEntry(autoCombo);
-          const key = autoComboModelId(autoCombo.variant);
+          const key = autoComboModelId(autoCombo.variant, autoCombo.id);
           const mapped: ModelV2 = {
             id: key,
             name: entry.name,
@@ -4636,7 +4636,7 @@ export function buildStaticProviderEntry(
       if (autoCombo.isHidden === true) continue;
       const entry = mapAutoComboToStaticEntry(autoCombo);
       // Use the variant as the key: "auto", "auto/coding", etc.
-      const key = autoComboModelId(autoCombo.variant);
+      const key = autoComboModelId(autoCombo.variant, autoCombo.id);
       if (models[key]) {
         // Collision with a raw model or DB combo — auto combo wins (log once)
         if (!reportedCollisions.has(key)) {
