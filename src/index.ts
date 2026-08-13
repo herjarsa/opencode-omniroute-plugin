@@ -717,6 +717,8 @@ export async function forceSyncOmniRouteModels(args: {
   baseURL?: string;
   clearedMemory: number;
   clearedDisk: boolean;
+  /** True when a 0-model refresh kept the previous catalog instead of overwriting it. */
+  preserved?: boolean;
   error?: string;
 }> {
   const resolved = args.resolved;
@@ -754,19 +756,50 @@ export async function forceSyncOmniRouteModels(args: {
     };
   }
 
-  const clearedMemory = invalidateOmniRouteFetchCache(cache, auth.baseURL);
-  // Clear residual entries from prior baseURL history as well.
-  const clearedAll = invalidateOmniRouteFetchCache(cache);
+  let clearedMemory = 0;
   let clearedDisk = false;
-  if (wantDiskCache) {
-    clearedDisk = await clearDiskSnapshot(resolved.providerId);
-    if (resolved.omnirouteProviderId !== resolved.providerId) {
-      clearedDisk = (await clearDiskSnapshot(resolved.omnirouteProviderId)) || clearedDisk;
-    }
-  }
-
   try {
     const rawModels = await fetcher(auth.baseURL, auth.apiKey, 10_000);
+    const cacheKey = modelsCacheKey(
+      auth.baseURL,
+      `${auth.apiKey}\0${auth.managementReadToken}`,
+    );
+
+    // Last-known-good: un gateway que responde 200 con un body no parseable
+    // produce rawModels === [] SIN lanzar. Sobrescribir cache y snapshot con
+    // ese catálogo vacío vaciaría el picker (quedarían solo combos/autos)
+    // hasta el siguiente tick sano — la intermitencia reportada. Conservamos
+    // la entrada previa cuando tenía modelos y reportamos preserved=true.
+    const prevEntry = cache.get(cacheKey);
+    if (rawModels.length === 0 && prevEntry && prevEntry.rawModels.length > 0) {
+      console.warn(
+        `[omniroute-plugin] force sync: /v1/models returned 0 models for providerId=${resolved.providerId}; ` +
+          `preserving last-known-good catalog (${prevEntry.rawModels.length} models)`,
+      );
+      return {
+        ok: true,
+        count: 0,
+        combos: 0,
+        provider: resolved.omnirouteProviderId,
+        baseURL: auth.baseURL,
+        clearedMemory: 0,
+        clearedDisk: false,
+        preserved: true,
+      };
+    }
+
+    // Solo con datos verificados en mano destruimos el estado anterior. Un
+    // fetch que lanza (catch abajo) deja cache y snapshot intactos.
+    clearedMemory =
+      invalidateOmniRouteFetchCache(cache, auth.baseURL) +
+      // Clear residual entries from prior baseURL history as well.
+      invalidateOmniRouteFetchCache(cache);
+    if (wantDiskCache) {
+      clearedDisk = await clearDiskSnapshot(resolved.providerId);
+      if (resolved.omnirouteProviderId !== resolved.providerId) {
+        clearedDisk = (await clearDiskSnapshot(resolved.omnirouteProviderId)) || clearedDisk;
+      }
+    }
     let rawCombos: OmniRouteRawCombo[] = [];
     if (wantCombos) {
       try {
@@ -822,10 +855,6 @@ export async function forceSyncOmniRouteModels(args: {
       rawConnections,
       expiresAt: t + resolved.modelCacheTtl,
     };
-    const cacheKey = modelsCacheKey(
-      auth.baseURL,
-      `${auth.apiKey}\0${auth.managementReadToken}`,
-    );
     cache.set(cacheKey, entry);
 
     if (wantDiskCache) {
@@ -845,7 +874,7 @@ export async function forceSyncOmniRouteModels(args: {
     console.warn(
       `[omniroute-plugin] force sync ok providerId=${resolved.providerId} ` +
         `models=${rawModels.length} combos=${rawCombos.length} ` +
-        `clearedMemory=${clearedMemory + clearedAll} disk=${clearedDisk}`,
+        `clearedMemory=${clearedMemory} disk=${clearedDisk}`,
     );
 
     return {
@@ -853,22 +882,23 @@ export async function forceSyncOmniRouteModels(args: {
       count: rawModels.length,
       combos: rawCombos.length,
       provider: resolved.omnirouteProviderId,
-      baseURL: auth.baseURL,
-      clearedMemory: clearedMemory + clearedAll,
-      clearedDisk,
-    };
-  } catch (err) {
+        baseURL: auth.baseURL,
+        clearedMemory,
+        clearedDisk,
+        preserved: false,
+      };
+    } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
       count: 0,
       combos: 0,
       provider: resolved.omnirouteProviderId,
-      baseURL: auth.baseURL,
-      clearedMemory: clearedMemory + clearedAll,
-      clearedDisk,
-      error: message,
-    };
+        baseURL: auth.baseURL,
+        clearedMemory,
+        clearedDisk,
+        error: message,
+      };
   }
 }
 
@@ -907,6 +937,7 @@ export function createOmniRouteSyncModelsTool(args: {
           `\nbaseURL: ${result.baseURL}` +
           `\nmodels: ${result.count}` +
           `\ncombos: ${result.combos}` +
+          `\npreservedLastKnownGood: ${result.preserved ?? false}` +
           `\nclearedMemoryEntries: ${result.clearedMemory}` +
           `\nclearedDiskSnapshot: ${result.clearedDisk}` +
           `\nTTL: ${resolved.modelCacheTtl}ms` +
@@ -947,6 +978,12 @@ export function startOmniRouteAutoSync(args: {
       if (!result.ok) {
         console.warn(
           `[omniroute-plugin] auto-sync failed providerId=${resolved.providerId}: ${result.error}`,
+        );
+        return;
+      }
+      if (result.preserved) {
+        console.warn(
+          `[omniroute-plugin] auto-sync preserved last-known-good catalog for providerId=${resolved.providerId} (0 models from /v1/models)`,
         );
         return;
       }
@@ -2964,7 +3001,7 @@ export function buildComboKey(
 // SHA-256 is intentional: cheap + deterministic, prevents the raw secret
 // from sitting in memory dumps alongside the cache map. Slow KDFs (bcrypt/
 // argon2) would defeat the purpose (sub-ms lookups on every request).
-function modelsCacheKey(baseURL: string, credentialId: string): string {
+export function modelsCacheKey(baseURL: string, credentialId: string): string {
   const h = createHash("sha256").update(credentialId).digest("hex");
   return `${baseURL}::${h}`;
 }
@@ -3164,6 +3201,9 @@ export function createOmniRouteProviderHook(
         rawConnections = cached.rawConnections;
         rawActiveIds = cached.activeModelIds ?? new Set();
       } else {
+        // Last-known-good source: the previous entry may be expired, but it
+        // is still a better answer than an empty fresh fetch.
+        const prevEntry = cache.get(cacheKey);
         // Models fetch is required (no catalog otherwise → silent provider
         // disappearance). We do NOT wrap this in a try; let the error
         // propagate to OC's UI.
@@ -3259,6 +3299,24 @@ export function createOmniRouteProviderHook(
               err
             );
           }
+        }
+
+        // Empty-refresh guard (same rationale as forceSync): a gateway that
+        // answers 200 with a non-parseable body yields rawModels === [].
+        // Overwriting the cache with that would blank the picker until the
+        // next healthy refresh — keep the last-known-good entry instead.
+        if (rawModels.length === 0 && prevEntry && prevEntry.rawModels.length > 0) {
+          console.warn(
+            `[omniroute-plugin] provider.models(${resolved.providerId}): /v1/models returned 0 models; ` +
+              `preserving last-known-good catalog (${prevEntry.rawModels.length} models)`,
+          );
+          rawModels = prevEntry.rawModels;
+          rawCombos = prevEntry.rawCombos;
+          rawAutoCombos = prevEntry.rawAutoCombos;
+          rawEnrichment = prevEntry.rawEnrichment;
+          rawCompressionCombos = prevEntry.rawCompressionCombos;
+          rawConnections = prevEntry.rawConnections;
+          rawActiveIds = prevEntry.activeModelIds ?? new Set();
         }
 
         cache.set(cacheKey, {
@@ -5398,11 +5456,16 @@ export function createOmniRouteConfigHook(
       // drop, offline laptop). The snapshot is whatever we last wrote on
       // a healthy refresh; staleness is bounded only by how recently the
       // user was online.
-      if (modelsFetchThrew && wantDiskCache) {
+      // Disk-cache fallback triggers on ANY empty models result — both a
+      // thrown fetch (network/403/timeout) and a 200 with a non-parseable
+      // body (rawModels === []). A 0-entry SUCCESS from a genuinely fresh
+      // tenant won't match the `snapshot.rawModels.length > 0` guard below,
+      // so it still publishes a valid empty stub instead of a phantom catalog.
+      if (rawModels.length === 0 && wantDiskCache) {
         const snapshot = await diskSnapshotReader(resolved.providerId, snapshotFingerprint);
         if (snapshot && snapshot.rawModels.length > 0) {
           logger.warn(
-            `[omniroute-plugin] config shim: /v1/models unreachable; using stale disk cache (${snapshot.rawModels.length} models)`
+            `[omniroute-plugin] config shim: /v1/models returned no models; using stale disk cache (${snapshot.rawModels.length} models)`
           );
           rawModels = snapshot.rawModels;
           rawCombos = snapshot.rawCombos;
