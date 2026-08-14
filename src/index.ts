@@ -5448,12 +5448,12 @@ export function createOmniRouteConfigHook(
     const t = now();
     const cached = cache.get(cacheKey);
 
-    let rawModels: OmniRouteRawModelEntry[];
-    let rawCombos: OmniRouteRawCombo[];
-    let rawAutoCombos: OmniRouteRawAutoCombo[];
-    let rawEnrichment: OmniRouteEnrichmentMap;
-    let rawCompressionCombos: OmniRouteCompressionCombo[];
-    let rawConnections: OmniRouteProviderConnection[];
+    let rawModels: OmniRouteRawModelEntry[] = [];
+    let rawCombos: OmniRouteRawCombo[] = [];
+    let rawAutoCombos: OmniRouteRawAutoCombo[] = [];
+    let rawEnrichment: OmniRouteEnrichmentMap = new Map();
+    let rawCompressionCombos: OmniRouteCompressionCombo[] = [];
+    let rawConnections: OmniRouteProviderConnection[] = [];
     let rawActiveIds: Set<string> = new Set();
 
     if (cached && cached.expiresAt > t) {
@@ -5465,128 +5465,19 @@ export function createOmniRouteConfigHook(
       rawConnections = cached.rawConnections;
       rawActiveIds = cached.activeModelIds ?? new Set();
     } else {
-      // Fail-open fetcher errors: on /v1/models throw, fall back to empty
-      // catalog (still publish a stub block so OC has a complete-shape
-      // entry); on /api/combos throw, publish models-only. Disk-cache
-      // fallback below recovers the last-known-good catalog when the
-      // fetcher threw (network down / 403 / timeout) AND features.diskCache
-      // !== false. A 0-entry SUCCESS (fresh tenant) does NOT trigger
-      // disk fallback — that's a valid empty catalog.
-      let modelsFetchThrew = false;
-      try {
-        rawModels = await fetcher(baseURL, apiKey, 10_000);
-      } catch (err) {
-        logger.warn(
-          "[omniroute-plugin] config shim: /v1/models fetch failed; publishing stub provider entry",
-          err
+      // Snapshot-first: hydrate from disk snapshot when valid; avoids a
+      // live /v1/models fetch at plugin init, which bun's plugin host can
+      // abort mid-shutdown with DOMException code 20 ("The operation was
+      // aborted") and crash the OpenCode process. Snapshot is the preferred
+      // source on every startup after the first; first install (no
+      // snapshot yet) still runs the fetcher chain below.
+      let hydratedFromSnapshot = false;
+      if (wantDiskCache) {
+        const snapshot = await diskSnapshotReader(
+          resolved.providerId,
+          snapshotFingerprint,
         );
-        rawModels = [];
-        modelsFetchThrew = true;
-      }
-      const modelsFetchOk = !modelsFetchThrew && rawModels.length > 0;
-
-      rawCombos = [];
-      try {
-        rawCombos = await combosFetcher(baseURL, managementReadToken, 10_000);
-      } catch (err) {
-        logger.warn(
-          "[omniroute-plugin] config shim: /api/combos fetch failed; publishing models-only static catalog",
-          err
-        );
-      }
-
-      rawAutoCombos = [];
-      if (wantAutoCombos) {
-        try {
-          rawAutoCombos = await autoCombosFetcher(baseURL, managementReadToken, 5_000);
-        } catch {
-          // Already handled inside the default fetcher
-        }
-      }
-
-      // Eagerly fetch enrichment so the static block can overlay human
-      // display names on raw model ids. On OC ≤1.15.5 the dynamic
-      // `provider.models` hook never fires in `serve` mode, so the static
-      // block IS what reaches `/provider` and the TUI model picker.
-      // Gated by `features.enrichment` (default-on). Soft-fail on error —
-      // we still publish a name-less catalog if /api/pricing/models is
-      // unreachable.
-      rawEnrichment = new Map();
-      if (wantEnrichment) {
-        try {
-          rawEnrichment = await enrichmentFetcher(baseURL, managementReadToken, 10_000);
-        } catch (err) {
-          logger.warn(
-            "[omniroute-plugin] config shim: /api/pricing/models fetch failed; publishing raw-id static catalog",
-            err
-          );
-        }
-      }
-
-      // Compression-metadata fetch — opt-in via features.compressionMetadata.
-      // When on, the default pipeline is appended to every combo `name` so
-      // the TUI picker advertises which compression a combo applies.
-      rawCompressionCombos = [];
-      if (wantCompressionMeta) {
-        try {
-          rawCompressionCombos = await compressionMetaFetcher(baseURL, managementReadToken, 10_000);
-        } catch (err) {
-          logger.warn(
-            "[omniroute-plugin] config shim: /api/context/combos fetch failed; publishing combos without compression suffix",
-            err
-          );
-        }
-      }
-
-      // Provider-connections fetch — opt-in via features.usableOnly. When
-      // on, the static catalog filters out models/combos whose canonical
-      // provider has no active connection. Soft-fail (empty list) disables
-      // the filter for this refresh, never hiding the whole catalog.
-      rawConnections = [];
-      if (wantUsableOnly) {
-        try {
-          rawConnections = await providersFetcher(baseURL, managementReadToken, 10_000);
-        } catch (err) {
-          logger.warn(
-            "[omniroute-plugin] config shim: /api/providers fetch failed; usableOnly filter disabled for this refresh",
-            err
-          );
-        }
-      }
-
-      // Dashboard-active models fetch — opt-in via features.activeOnly.
-      // When on, the static catalog keeps only the models the operator
-      // enabled in the OmniRoute dashboard. Soft-fail (empty set) keeps
-      // the full catalog for this refresh.
-      rawActiveIds = new Set();
-      if (wantActiveOnly) {
-        try {
-          rawActiveIds = await activeModelsFetcher(baseURL, managementReadToken, 10_000);
-        } catch (err) {
-          logger.warn(
-            "[omniroute-plugin] config shim: /api/models fetch failed; activeOnly filter disabled for this refresh",
-            err
-          );
-        }
-      }
-
-      // Disk-cache fallback: when the live fetch returned no models AND
-      // features.diskCache !== false, hydrate from the last-known-good
-      // snapshot so OC still surfaces a usable catalog (e.g. IP whitelist
-      // drop, offline laptop). The snapshot is whatever we last wrote on
-      // a healthy refresh; staleness is bounded only by how recently the
-      // user was online.
-      // Disk-cache fallback triggers on ANY empty models result — both a
-      // thrown fetch (network/403/timeout) and a 200 with a non-parseable
-      // body (rawModels === []). A 0-entry SUCCESS from a genuinely fresh
-      // tenant won't match the `snapshot.rawModels.length > 0` guard below,
-      // so it still publishes a valid empty stub instead of a phantom catalog.
-      if (rawModels.length === 0 && wantDiskCache) {
-        const snapshot = await diskSnapshotReader(resolved.providerId, snapshotFingerprint);
         if (snapshot && snapshot.rawModels.length > 0) {
-          logger.warn(
-            `[omniroute-plugin] config shim: /v1/models returned no models; using stale disk cache (${snapshot.rawModels.length} models)`
-          );
           rawModels = snapshot.rawModels;
           rawCombos = snapshot.rawCombos;
           rawAutoCombos = snapshot.rawAutoCombos ?? [];
@@ -5594,6 +5485,127 @@ export function createOmniRouteConfigHook(
           rawCompressionCombos = snapshot.rawCompressionCombos;
           rawConnections = snapshot.rawConnections;
           rawActiveIds = snapshot.activeModelIds ?? new Set();
+          hydratedFromSnapshot = true;
+          logger.warn(
+            `[omniroute-plugin] config shim: hydrated from disk snapshot (${snapshot.rawModels.length} models); skipping live fetches to avoid init-time aborts`,
+          );
+        }
+      }
+      // modelsFetchOk tracks whether the catalog we publish is non-empty
+      // so the disk-cache writer can persist on first install / fresh refresh.
+      let modelsFetchOk = hydratedFromSnapshot;
+      if (!hydratedFromSnapshot) {
+        // Fail-open fetcher errors: on /v1/models throw, publish a stub block
+        // so OC has a complete-shape entry; on /api/combos throw, publish
+        // models-only. Disk-cache fallback below recovers last-known-good
+        // when the fetcher threw (network/403/timeout) AND diskCache !== false.
+        let modelsFetchThrew = false;
+        try {
+          rawModels = await fetcher(baseURL, apiKey, 10_000);
+        } catch (err) {
+          logger.warn(
+            "[omniroute-plugin] config shim: /v1/models fetch failed; publishing stub provider entry",
+            err
+          );
+          rawModels = [];
+          modelsFetchThrew = true;
+        }
+        modelsFetchOk = !modelsFetchThrew && rawModels.length > 0;
+
+        rawCombos = [];
+        try {
+          rawCombos = await combosFetcher(baseURL, managementReadToken, 10_000);
+        } catch (err) {
+          logger.warn(
+            "[omniroute-plugin] config shim: /api/combos fetch failed; publishing models-only static catalog",
+            err
+          );
+        }
+
+        rawAutoCombos = [];
+        if (wantAutoCombos) {
+          try {
+            rawAutoCombos = await autoCombosFetcher(baseURL, managementReadToken, 5_000);
+          } catch {
+            /* soft-fail */
+          }
+        }
+
+        // Eagerly fetch enrichment so the static block can overlay human
+        // display names on raw model ids. On OC ≤ 1.15.5 the dynamic
+        // `provider.models` hook never fires in `serve` mode, so the static
+        // block IS what reaches `/provider` and the TUI model picker.
+        // Gated by `features.enrichment` (default-on). Soft-fail on error.
+        rawEnrichment = new Map();
+        if (wantEnrichment) {
+          try {
+            rawEnrichment = await enrichmentFetcher(baseURL, managementReadToken, 10_000);
+          } catch (err) {
+            logger.warn(
+              "[omniroute-plugin] config shim: /api/pricing/models fetch failed; publishing raw-id static catalog",
+              err
+            );
+          }
+        }
+
+        // Compression-metadata fetch — opt-in via features.compressionMetadata.
+        rawCompressionCombos = [];
+        if (wantCompressionMeta) {
+          try {
+            rawCompressionCombos = await compressionMetaFetcher(baseURL, managementReadToken, 10_000);
+          } catch (err) {
+            logger.warn(
+              "[omniroute-plugin] config shim: /api/context/combos fetch failed; publishing combos without compression suffix",
+              err
+            );
+          }
+        }
+
+        // Provider-connections fetch — opt-in via features.usableOnly.
+        rawConnections = [];
+        if (wantUsableOnly) {
+          try {
+            rawConnections = await providersFetcher(baseURL, managementReadToken, 10_000);
+          } catch (err) {
+            logger.warn(
+              "[omniroute-plugin] config shim: /api/providers fetch failed; usableOnly filter disabled for this refresh",
+              err
+            );
+          }
+        }
+
+        // Dashboard-active models fetch — opt-in via features.activeOnly.
+        rawActiveIds = new Set();
+        if (wantActiveOnly) {
+          try {
+            rawActiveIds = await activeModelsFetcher(baseURL, managementReadToken, 10_000);
+          } catch (err) {
+            logger.warn(
+              "[omniroute-plugin] config shim: /api/models fetch failed; activeOnly filter disabled for this refresh",
+              err
+            );
+          }
+        }
+
+        // Disk-cache fallback: when the live fetch returned no models AND
+        // features.diskCache !== false, hydrate from last-known-good so OC
+        // still surfaces a usable catalog (e.g. IP whitelist drop, offline
+        // laptop). Snapshot may be stale but bounded by how recently the
+        // user was online.
+        if (rawModels.length === 0 && wantDiskCache) {
+          const snapshot = await diskSnapshotReader(resolved.providerId, snapshotFingerprint);
+          if (snapshot && snapshot.rawModels.length > 0) {
+            logger.warn(
+              `[omniroute-plugin] config shim: /v1/models returned no models; using stale disk cache (${snapshot.rawModels.length} models)`
+            );
+            rawModels = snapshot.rawModels;
+            rawCombos = snapshot.rawCombos;
+            rawAutoCombos = snapshot.rawAutoCombos ?? [];
+            rawEnrichment = snapshot.rawEnrichment;
+            rawCompressionCombos = snapshot.rawCompressionCombos;
+            rawConnections = snapshot.rawConnections;
+            rawActiveIds = snapshot.activeModelIds ?? new Set();
+          }
         }
       }
 
@@ -5627,9 +5639,10 @@ export function createOmniRouteConfigHook(
 
       // Disk-cache write: persist the last successful (or any non-empty)
       // catalog so a subsequent cold start with a failed fetch can recover.
-      // Best-effort; soft-fail keeps us moving when the data dir isn't
-      // writable (e.g. read-only container).
-      if (modelsFetchOk && wantDiskCache) {
+      // Skip when we hydrated FROM the snapshot — data unchanged, no need
+      // to rewrite. Best-effort; soft-fail keeps us moving when the data
+      // dir isn't writable (e.g. read-only container).
+      if (!hydratedFromSnapshot && modelsFetchOk && wantDiskCache) {
         await diskSnapshotWriter(
           resolved.providerId,
           {

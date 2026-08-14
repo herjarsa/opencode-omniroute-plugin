@@ -31,6 +31,7 @@ import {
   buildStaticProviderEntry,
   createOmniRouteConfigHook,
   createOmniRouteProviderHook,
+  noopDiskSnapshotReader,
   OmniRoutePlugin,
   resolveOmniRoutePluginOptions,
   type OmniRouteCombosFetcher,
@@ -211,7 +212,7 @@ test("config: with valid auth.json + apiKey + baseURL → mutates input.provider
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -275,7 +276,7 @@ test("config: auth.json under bare key (pre-prefix login) resolves via dual-key 
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" }, // resolves to opencode-omniroute internally
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -298,7 +299,7 @@ test("config: prefixed key wins over bare key when both present (dual-key preced
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -327,7 +328,7 @@ test("config: missing auth.json file → no-op, no throw, no input mutation", as
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -356,7 +357,7 @@ test("config: malformed auth.json → no-op + warn once", async () => {
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -390,7 +391,7 @@ test("config: existing input.provider[id] → no overwrite (respect manual overr
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput({ "opencode-omniroute": manual });
   await hook(input);
@@ -422,7 +423,7 @@ test("config: fetchers throw → warn + emit stub entry with models: {}", async 
   // test below).
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", features: { diskCache: false } },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -460,7 +461,7 @@ test("config: combos fetcher throws → emit models-only catalog (no combos in m
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -495,7 +496,7 @@ test("config: baseURL from auth.json takes precedence when opts.baseURL absent",
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" }, // NO opts.baseURL
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -517,7 +518,7 @@ test("config: opts.baseURL wins over auth.json's stored baseURL", async () => {
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://opts.example/v1" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -539,7 +540,7 @@ test("config: no baseURL resolvable (no opts, no auth.json baseURL) → no-op", 
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" }, // NO opts.baseURL
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -576,11 +577,11 @@ test("config: multi-instance — two plugins with different providerIds publish 
 
   const hookA = createOmniRouteConfigHook(
     { providerId: "omniroute-prod" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const hookB = createOmniRouteConfigHook(
     { providerId: "omniroute-preprod" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
 
   const input = makeInput();
@@ -620,7 +621,7 @@ test("config + provider share cache: second call uses cached fetch result (singl
 
   const configHook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", modelCacheTtl: 60_000 },
-    { readAuthJson, fetcher, combosFetcher, cache: sharedCache, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, cache: sharedCache, logger }
   );
   const providerHook = createOmniRouteProviderHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", modelCacheTtl: 60_000 },
@@ -652,7 +653,7 @@ test("provider → config order also dedupes (cache populated by provider, consu
 
   const configHook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", modelCacheTtl: 60_000 },
-    { readAuthJson, fetcher, combosFetcher, cache: sharedCache, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, cache: sharedCache, logger }
   );
   const providerHook = createOmniRouteProviderHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", modelCacheTtl: 60_000 },
@@ -890,7 +891,7 @@ test("config: auth.json entry of wrong type (oauth) → no-op", async () => {
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -907,7 +908,7 @@ test("config: readAuthJson throws → treat as missing file (silent fallback)", 
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -927,7 +928,7 @@ test("config: initialises input.provider when undefined", async () => {
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, logger }
   );
   // input with NO provider field at all
   const input = {} as Config;
@@ -958,7 +959,7 @@ test("config: enrichment fetched + name overlaid on raw-model entries", async ()
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -989,7 +990,7 @@ test("config: features.enrichment=false skips enrichment fetch + keeps raw-id na
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", features: { enrichment: false } },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -1017,7 +1018,7 @@ test("config: enrichment fetcher throws → soft-fail (warn + raw-id static cata
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -1087,7 +1088,7 @@ test("config: usableOnly=false → no filter (existing behavior)", async () => {
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1" },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher }
   );
 
   const input = makeInput();
@@ -1137,7 +1138,7 @@ test("config: usableOnly=true → drops models for non-usable providers, keeps u
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", features: { usableOnly: true } },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher }
   );
 
   const input = makeInput();
@@ -1169,7 +1170,7 @@ test("config: usableOnly=true + providers fetch fails → soft-fail keeps everyt
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", features: { usableOnly: true } },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher, logger }
   );
 
   const input = makeInput();
@@ -1239,7 +1240,7 @@ test("config: diskCache hydrates stale snapshot when /v1/models throws", async (
   );
   assert.equal(writes, 0, "disk write skipped when live fetch failed");
   assert.ok(
-    logger.entries.some((e) => String(e[0]).includes("using stale disk cache")),
+    logger.entries.some((e) => String(e[0]).includes("hydrated from disk snapshot")),
     "disk-cache hydration breadcrumb emitted"
   );
 });
@@ -1264,7 +1265,7 @@ test("config: cached rawEnrichment from earlier provider hook is reused (no refe
   );
   const configHook = createOmniRouteConfigHook(
     { providerId: "omniroute", baseURL: "https://or.example/v1", modelCacheTtl: 60_000 },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, cache: sharedCache, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, cache: sharedCache, logger }
   );
 
   // Provider hook fires first (e.g. eager cache warm-up), populates rawEnrichment.
@@ -1322,7 +1323,7 @@ test("config: providerTag (default-on) prepends '<provider> - ' to enriched raw-
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -1355,7 +1356,7 @@ test("config: providerTag=false suppresses the suffix", async () => {
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", features: { providerTag: false } },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -1388,7 +1389,7 @@ test("config: providerTag falls back to UPPER(alias) when providerDisplayName mi
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -1415,7 +1416,7 @@ test("config: providerTag skipped entirely when neither providerDisplayName nor 
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute" },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
   await hook(input);
@@ -1442,7 +1443,7 @@ test("config: providerTag is idempotent — second hook call doesn't double-suff
 
   const hook = createOmniRouteConfigHook(
     { providerId: "omniroute", modelCacheTtl: 60_000 },
-    { readAuthJson, fetcher, combosFetcher, enrichmentFetcher, cache: sharedCache, logger }
+    { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, cache: sharedCache, logger }
   );
 
   const inputA = makeInput();
