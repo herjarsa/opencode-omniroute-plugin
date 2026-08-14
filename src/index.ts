@@ -708,6 +708,7 @@ export async function forceSyncOmniRouteModels(args: {
   enrichmentFetcher?: OmniRouteEnrichmentFetcher;
   compressionMetaFetcher?: OmniRouteCompressionMetaFetcher;
   providersFetcher?: OmniRouteProvidersFetcher;
+  activeModelsFetcher?: OmniRouteActiveModelsFetcher;
   now?: () => number;
 }): Promise<{
   ok: boolean;
@@ -731,12 +732,14 @@ export async function forceSyncOmniRouteModels(args: {
   const compressionMetaFetcher =
     args.compressionMetaFetcher ?? defaultOmniRouteCompressionMetaFetcher;
   const providersFetcher = args.providersFetcher ?? defaultOmniRouteProvidersFetcher;
+  const activeModelsFetcher = args.activeModelsFetcher ?? defaultOmniRouteActiveModelsFetcher;
   const features = resolved.features ?? {};
   const wantCombos = features.combos !== false;
   const wantAutoCombos = features.autoCombos !== false;
   const wantEnrichment = features.enrichment !== false;
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
+  const wantActiveOnly = features.activeOnly === true;
   const wantDiskCache = features.diskCache !== false;
 
   const auth = await resolveOmniRouteRuntimeAuth(
@@ -845,6 +848,28 @@ export async function forceSyncOmniRouteModels(args: {
       }
     }
 
+    // Dashboard-active models fetch — mirrors the provider hook so a
+    // forceSync (auto-sync tick / manual tool) writes the SAME active-set
+    // into the shared cache. Without this, the next provider.models() cache
+    // hit sees an empty set, the `size > 0` guard disables the filter, and
+    // the picker flips between the filtered and the full catalog on every
+    // auto-sync cycle. Soft-fail (empty set) keeps the full catalog.
+    let rawActiveIds: Set<string> = new Set();
+    if (wantActiveOnly) {
+      try {
+        rawActiveIds = await activeModelsFetcher(
+          auth.baseURL,
+          auth.managementReadToken,
+          10_000,
+        );
+      } catch (err) {
+        console.warn(
+          "[omniroute-plugin] force sync: /api/models fetch failed; activeOnly filter disabled for this refresh",
+          err,
+        );
+      }
+    }
+
     const t = now();
     const entry = {
       rawModels,
@@ -853,6 +878,7 @@ export async function forceSyncOmniRouteModels(args: {
       rawEnrichment,
       rawCompressionCombos,
       rawConnections,
+      activeModelIds: rawActiveIds,
       expiresAt: t + resolved.modelCacheTtl,
     };
     cache.set(cacheKey, entry);
@@ -4766,9 +4792,11 @@ interface OmniRouteDiskSnapshot {
   rawAutoCombos?: OmniRouteRawAutoCombo[];
   /** Serialised as array-of-pairs (Map is not JSON-friendly). */
   rawEnrichment: Array<[string, OmniRouteEnrichmentEntry]>;
-  rawCompressionCombos: OmniRouteCompressionCombo[];
-  rawConnections: OmniRouteProviderConnection[];
-  /** When the snapshot was written (epoch ms). */
+        rawCompressionCombos: OmniRouteCompressionCombo[];
+        rawConnections: OmniRouteProviderConnection[];
+        /** Dashboard-active model ids (features.activeOnly). Serialised as an array (Set is not JSON-friendly). */
+        activeModelIds?: string[];
+        /** When the snapshot was written (epoch ms). */
   writtenAt: number;
 }
 
@@ -4846,6 +4874,7 @@ export const defaultDiskSnapshotWriter: OmniRouteDiskSnapshotWriter = async (
       rawEnrichment: Array.from(entry.rawEnrichment.entries()),
       rawCompressionCombos: entry.rawCompressionCombos,
       rawConnections: entry.rawConnections,
+      activeModelIds: Array.from(entry.activeModelIds ?? []),
       writtenAt: Date.now(),
     };
     await writeFile(file, JSON.stringify(snapshot), {
@@ -4883,6 +4912,9 @@ export const defaultDiskSnapshotReader: OmniRouteDiskSnapshotReader = async (
         ? parsed.rawCompressionCombos
         : [],
       rawConnections: Array.isArray(parsed.rawConnections) ? parsed.rawConnections : [],
+      activeModelIds: new Set(
+        Array.isArray(parsed.activeModelIds) ? parsed.activeModelIds : []
+      ),
     };
   } catch {
     return undefined;
@@ -5473,6 +5505,7 @@ export function createOmniRouteConfigHook(
           rawEnrichment = snapshot.rawEnrichment;
           rawCompressionCombos = snapshot.rawCompressionCombos;
           rawConnections = snapshot.rawConnections;
+          rawActiveIds = snapshot.activeModelIds ?? new Set();
         }
       }
 
@@ -5518,6 +5551,7 @@ export function createOmniRouteConfigHook(
             rawEnrichment,
             rawCompressionCombos,
             rawConnections,
+            activeModelIds: rawActiveIds,
           },
           snapshotFingerprint
         );
