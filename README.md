@@ -10,7 +10,8 @@ This plugin solves that by:
 
 - Fetching `/v1/models` and `/api/combos` **at OpenCode startup, in Node.js** — no CORS, no WebView restrictions
 - Emitting the provider block **dynamically** in the plugin's `config`/`provider` hook — so `opencode.json` only needs the plugin entry, not a static `provider.omniroute`
-- Re-fetching on a configurable TTL (default 5 min) **and** background auto-discovery while OpenCode is running (`autoSyncIntervalMs`, default 5 min), so new models / combo changes appear without restarting OpenCode
+- Re-fetching on a configurable TTL (default 5 min) so new models / combo changes appear without restarting OpenCode
+- Running a **one-shot startup sync** that refreshes the cache + disk snapshot only when `/v1/models` returns a catalog that differs from the previous one (in-memory cache or disk snapshot). No periodic background timer — the TTL on-demand refresh covers mid-session changes.
 - Exposing a force-refresh path (`omniroute_sync_models` tool + `/omni-sync` command template) equivalent to Pi `/omni sync`
 - Computing `limit.context` for combos as `min(member.context_length)` from the live catalog (no more `null` values that cause 4K-token truncation)
 - **Auto-pickup of `interleaved` capability** for thinking models (merged via PR #3138)
@@ -74,9 +75,9 @@ Peer dep: `@opencode-ai/plugin` (managed by your OpenCode install).
       {
         "providerId": "omniroute",
         "baseURL": "https://or.example.com",
-        // Background re-discovery while OpenCode is running (Pi parity).
-        // Default 300000 (5 min). Minimum 60000. Set 0 to disable.
-        "autoSyncIntervalMs": 300000,
+        // TTL on-demand refresh; the one-shot startup sync only writes
+        // when the catalog actually changed. Default 300000 (5 min).
+        "modelCacheTtl": 300000,
       },
     ],
   ],
@@ -99,14 +100,15 @@ While OpenCode is running, the plugin keeps the model catalog fresh in two ways:
 | Mechanism | Default | What it does |
 | --- | --- | --- |
 | `modelCacheTtl` | `300000` (5 min) | On-demand TTL: next provider/models hook after expiry re-fetches `/v1/models` |
-| `autoSyncIntervalMs` | `300000` (5 min) | Background timer: proactively invalidates + re-fetches while the harness is running. Min `60000`. Set `0` to disable background polling (TTL still applies) |
+| Startup sync (one-shot) | n/a | At plugin init, fetch `/v1/models` once and only update cache + disk snapshot when the catalog has new models compared to the previous one. No periodic timer. |
+| `autoSyncIntervalMs` | `300000` (5 min) | **Legacy** — accepted by the schema for backward compat but ignored at runtime. Background polling was removed; use `modelCacheTtl` for on-demand refreshes and `/omni-sync` for explicit force-refresh. |
 
 **Force sync now** (Pi `/omni sync` equivalent) — OpenCode has no Pi-style slash-command registration API, so the plugin wires both a tool and command templates:
 
 1. **Tool:** `omniroute_sync_models` — invalidates in-memory + disk caches, re-fetches `GET /v1/models` (and combos/enrichment when enabled), returns `{ ok, count, ... }`.
 2. **Command templates** (type these in OpenCode):
    - `/omni-sync` — asks the agent to call `omniroute_sync_models` and report the result
-   - `/omni-autosync` — asks the agent to report current `autoSyncIntervalMs` / `modelCacheTtl` status
+   - `/omni-autosync` — asks the agent to report current startup-sync / `modelCacheTtl` status
 
 ```text
 /omni-sync

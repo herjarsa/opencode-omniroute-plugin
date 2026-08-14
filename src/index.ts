@@ -89,10 +89,13 @@ import {
  *                     from providerId.
  *  - `modelCacheTtl`  `/v1/models` TTL cache duration in milliseconds.
  *                     Default: 300_000 (5 min).
- *  - `autoSyncIntervalMs` Background catalog re-discovery while OpenCode is
- *                     running. Default: 300_000 (5 min). Minimum: 60_000.
- *                     Set `0` to disable background auto-sync (TTL on-demand
- *                     discovery still applies via `modelCacheTtl`).
+ *  - `autoSyncIntervalMs` Legacy option, currently ignored at runtime. The
+ *                     plugin runs a one-shot startup sync (refreshes cache +
+ *                     disk snapshot only when /v1/models returns a new
+ *                     catalog compared to the previous one) and relies on
+ *                     `modelCacheTtl` for on-demand refreshes. Kept for
+ *                     backward compat — accepted by the schema and sanitizer,
+ *                     not consumed. Default: 300_000 (5 min). Min: 60_000.
  *  - `baseURL`        Override base URL for this OmniRoute instance. When
  *                     absent, the loader falls back to a credential-attached
  *                     baseURL set by `/connect`.
@@ -694,6 +697,59 @@ export async function resolveOmniRouteRuntimeAuth(
 }
 
 /**
+ * True when the two collections expose the same set of model ids. Order
+ * and duplicates are irrelevant — this is the cheap, side-effect-free
+ * comparison the startup sync uses to decide whether to overwrite cache
+ * and disk snapshot.
+ */
+function sameModelIdSet(prevIds: Set<string>, rawModels: OmniRouteRawModelEntry[]): boolean {
+  if (prevIds.size !== rawModels.length) return false;
+  for (const m of rawModels) {
+    if (!prevIds.has(m.id)) return false;
+  }
+  return true;
+}
+
+/**
+ * Load the set of model ids from the previous catalog, preferring the
+ * in-memory cache and falling back to the on-disk snapshot when the
+ * cache is cold (process restart). Returns `null` when no previous
+ * catalog is available, which signals "treat the fresh fetch as a
+ * change" — the caller should not treat `null` as `unchanged`.
+ *
+ * Disk read is best-effort and soft-fails on any I/O or fingerprint
+ * mismatch — we never want this comparison path to throw.
+ */
+async function loadPreviousModelIds(args: {
+  cache: OmniRouteFetchCache;
+  cacheKey: string;
+  resolved: ResolvedOmniRoutePluginOptions;
+  auth: { baseURL: string; apiKey: string; managementReadToken: string };
+  wantDiskCache: boolean;
+  diskSnapshotReader: OmniRouteDiskSnapshotReader;
+}): Promise<Set<string> | null> {
+  const prevEntry = args.cache.get(args.cacheKey);
+  if (prevEntry && prevEntry.rawModels.length > 0) {
+    return new Set(prevEntry.rawModels.map((m) => m.id));
+  }
+  if (!args.wantDiskCache) return null;
+  try {
+    const fingerprint = diskSnapshotIdentityFingerprint(
+      args.auth.baseURL,
+      args.auth.apiKey,
+      args.auth.managementReadToken,
+    );
+    const snapshot = await args.diskSnapshotReader(args.resolved.providerId, fingerprint);
+    if (snapshot && snapshot.rawModels.length > 0) {
+      return new Set(snapshot.rawModels.map((m) => m.id));
+    }
+  } catch {
+    /* soft-fail: treat as no previous catalog */
+  }
+  return null;
+}
+
+/**
  * Force-refresh OmniRoute catalog: clear memory + disk cache, re-fetch /v1/models
  * (and optional management endpoints), and repopulate the shared cache.
  * OpenCode equivalent of Pi `/omni sync`.
@@ -709,7 +765,17 @@ export async function forceSyncOmniRouteModels(args: {
   compressionMetaFetcher?: OmniRouteCompressionMetaFetcher;
   providersFetcher?: OmniRouteProvidersFetcher;
   activeModelsFetcher?: OmniRouteActiveModelsFetcher;
+  diskSnapshotReader?: OmniRouteDiskSnapshotReader;
   now?: () => number;
+  /**
+   * When true, only invalidate/update cache + disk snapshot if the fetched
+   * model IDs differ from the previous catalog (in-memory cache or disk
+   * snapshot). Skips the combos/enrichment/connections fetches entirely when
+   * the catalog is unchanged. Used by the one-shot startup sync so we
+   * never overwrite a healthy snapshot when the server returns the same
+   * catalog we already have.
+   */
+  onlyIfChanged?: boolean;
 }): Promise<{
   ok: boolean;
   count: number;
@@ -720,6 +786,8 @@ export async function forceSyncOmniRouteModels(args: {
   clearedDisk: boolean;
   /** True when a 0-model refresh kept the previous catalog instead of overwriting it. */
   preserved?: boolean;
+  /** True when onlyIfChanged was set and the fetched model IDs matched the previous catalog. */
+  unchanged?: boolean;
   error?: string;
 }> {
   const resolved = args.resolved;
@@ -733,6 +801,7 @@ export async function forceSyncOmniRouteModels(args: {
     args.compressionMetaFetcher ?? defaultOmniRouteCompressionMetaFetcher;
   const providersFetcher = args.providersFetcher ?? defaultOmniRouteProvidersFetcher;
   const activeModelsFetcher = args.activeModelsFetcher ?? defaultOmniRouteActiveModelsFetcher;
+  const diskSnapshotReader = args.diskSnapshotReader ?? defaultDiskSnapshotReader;
   const features = resolved.features ?? {};
   const wantCombos = features.combos !== false;
   const wantAutoCombos = features.autoCombos !== false;
@@ -789,6 +858,35 @@ export async function forceSyncOmniRouteModels(args: {
         clearedDisk: false,
         preserved: true,
       };
+    }
+
+    // onlyIfChanged: si los ids del catálogo fresco coinciden con los del
+    // catálogo previo (cache en memoria o snapshot de disco), no tocamos
+    // cache ni disco. Esto evita escrituras innecesarias en cada arranque
+    // y reduce la superficie de bugs en runtimes que abortan fetches
+    // concurrentes (p. ej. bun al shutdown del plugin).
+    if (args.onlyIfChanged && rawModels.length > 0) {
+      const prevIds = await loadPreviousModelIds({
+        cache,
+        cacheKey,
+        resolved,
+        auth,
+        wantDiskCache,
+        diskSnapshotReader,
+      });
+      if (prevIds && sameModelIdSet(prevIds, rawModels)) {
+        return {
+          ok: true,
+          count: rawModels.length,
+          combos: 0,
+          provider: resolved.omnirouteProviderId,
+          baseURL: auth.baseURL,
+          clearedMemory: 0,
+          clearedDisk: false,
+          preserved: false,
+          unchanged: true,
+        };
+      }
     }
 
     // Solo con datos verificados en mano destruimos el estado anterior. Un
@@ -967,7 +1065,7 @@ export function createOmniRouteSyncModelsTool(args: {
           `\nclearedMemoryEntries: ${result.clearedMemory}` +
           `\nclearedDiskSnapshot: ${result.clearedDisk}` +
           `\nTTL: ${resolved.modelCacheTtl}ms` +
-          `\nautoSyncIntervalMs: ${resolved.autoSyncIntervalMs}` +
+          `\nstartupSync: one-shot, only-if-changed` +
           reason,
         metadata: result,
       };
@@ -976,78 +1074,62 @@ export function createOmniRouteSyncModelsTool(args: {
 }
 
 /**
- * Start background auto-discovery while the harness is running.
- * Quiet: only logs when the model count changes or on errors.
- * Returns a stop function.
+ * One-shot startup sync. Runs exactly once when the plugin initializes,
+ * fire-and-forget — never blocks the OpenCode startup path.
+ *
+ * Only updates cache + disk snapshot when the fetched `/v1/models`
+ * catalog differs from the previous one (in-memory cache or disk
+ * snapshot). This replaces the background `setInterval` auto-sync that
+ * caused runtime aborts in bun's plugin host: the timer could fire
+ * mid-shutdown and the resulting fetch produced an unhandled `AbortError`
+ * that crashed the process. The one-shot runs exactly once at startup,
+ * so there is no timer to abort mid-flight.
+ *
+ * Quiet by design: unchanged catalogs are the common case and produce
+ * no log. Logs only when the catalog actually changed, when the
+ * last-known-good fallback kicked in, or when the fetch failed.
+ *
+ * Errors are caught and logged with `console.warn` — they never escape
+ * this function. The caller (`OmniRoutePlugin`) does not await the
+ * returned promise.
  */
-export function startOmniRouteAutoSync(args: {
+export function runOmniRouteStartupSync(args: {
   resolved: ResolvedOmniRoutePluginOptions;
   cache: OmniRouteFetchCache;
-  intervalMs?: number;
-}): () => void {
-  const resolved = args.resolved;
-  const cache = args.cache;
-  const intervalMs = args.intervalMs ?? resolved.autoSyncIntervalMs;
-  if (!intervalMs || intervalMs <= 0) {
-    return () => {};
-  }
-
-  let stopped = false;
-  let inFlight: Promise<void> | null = null;
-  let lastCount: number | undefined;
-
-  const tick = () => {
-    if (stopped) return;
-    if (inFlight) return;
-    inFlight = (async () => {
-      const result = await forceSyncOmniRouteModels({ resolved, cache });
-      if (!result.ok) {
-        console.warn(
-          `[omniroute-plugin] auto-sync failed providerId=${resolved.providerId}: ${result.error}`,
-        );
+}): void {
+  const { resolved, cache } = args;
+  void (async () => {
+    try {
+      const result = await forceSyncOmniRouteModels({
+        resolved,
+        cache,
+        onlyIfChanged: true,
+      });
+      if (result.unchanged) {
+        // Common case: no log. The cache + snapshot are already current.
         return;
       }
       if (result.preserved) {
         console.warn(
-          `[omniroute-plugin] auto-sync preserved last-known-good catalog for providerId=${resolved.providerId} (0 models from /v1/models)`,
+          `[omniroute-plugin] startup sync preserved last-known-good catalog (providerId=${resolved.providerId})`,
         );
         return;
       }
-      if (lastCount === undefined) {
-        lastCount = result.count;
-        return;
-      }
-      if (result.count !== lastCount) {
+      if (!result.ok) {
         console.warn(
-          `[omniroute-plugin] auto-sync catalog size changed ${lastCount} → ${result.count} ` +
-            `(providerId=${resolved.providerId})`,
+          `[omniroute-plugin] startup sync failed providerId=${resolved.providerId}: ${result.error}`,
         );
-        lastCount = result.count;
+        return;
       }
-    })()
-      .catch((err) => {
-        console.warn("[omniroute-plugin] auto-sync tick error", err);
-      })
-      .finally(() => {
-        inFlight = null;
-      });
-  };
-
-  // Delay first background tick by one interval so session start is not doubled
-  // with the normal provider.models cold fetch. Manual tool remains immediate.
-  const timer = setInterval(tick, intervalMs);
-  if (typeof timer === "object" && timer && "unref" in timer && typeof timer.unref === "function") {
-    timer.unref();
-  }
-
-  console.warn(
-    `[omniroute-plugin] auto-sync enabled intervalMs=${intervalMs} providerId=${resolved.providerId}`,
-  );
-
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-  };
+      console.warn(
+        `[omniroute-plugin] startup sync picked up new models providerId=${resolved.providerId} count=${result.count}`,
+      );
+    } catch (err) {
+      // Defensive: forceSyncOmniRouteModels already returns {ok:false} on
+      // errors instead of throwing, so this is belt-and-suspenders.
+      console.warn("[omniroute-plugin] startup sync error", err);
+    }
+  })();
 }
 
 export const OmniRoutePlugin: Plugin = async (_input, options) => {
@@ -1081,9 +1163,13 @@ export const OmniRoutePlugin: Plugin = async (_input, options) => {
   // Wire log level: startupDebug:true → "debug", explicit logLevel wins.
   setLogLevel(resolved.features?.startupDebug ? "debug" : (resolved.features?.logLevel ?? "warn"));
 
-  // Background auto-discovery while the harness is running (Pi parity).
-  // Interval 0 disables. TTL on-demand discovery still works via modelCacheTtl.
-  startOmniRouteAutoSync({ resolved, cache: sharedCache });
+  // One-shot startup sync: fetches /v1/models once at plugin init and only
+  // updates cache + disk snapshot if the catalog has new models compared to
+  // the previous (cache or disk snapshot). Replaces the periodic
+  // setInterval auto-sync that caused unhandled AbortError crashes in
+  // bun's plugin runtime when the timer fired mid-shutdown. Background
+  // on-demand refresh is handled by `modelCacheTtl` on the provider hook.
+  runOmniRouteStartupSync({ resolved, cache: sharedCache });
 
   const syncTool = createOmniRouteSyncModelsTool({ resolved, cache: sharedCache });
   const bareProviderId = resolved.omnirouteProviderId;
@@ -1111,10 +1197,12 @@ export const OmniRoutePlugin: Plugin = async (_input, options) => {
     }
     if (!cfg.command["omni-autosync"]) {
       cfg.command["omni-autosync"] = {
-        description: "Show OmniRoute auto-sync / cache status",
+        description: "Show OmniRoute startup-sync / cache status",
         template:
           `Report OmniRoute discovery status for provider ${bareProviderId}: ` +
-          `autoSyncIntervalMs=${resolved.autoSyncIntervalMs}, modelCacheTtl=${resolved.modelCacheTtl}. ` +
+          `modelCacheTtl=${resolved.modelCacheTtl}. The plugin runs a one-shot ` +
+          `startup sync that only refreshes cache + disk snapshot when /v1/models ` +
+          `has new models compared to the previous catalog (no periodic timer). ` +
           `If the user asked to refresh now, call omniroute_sync_models.`,
       };
     }

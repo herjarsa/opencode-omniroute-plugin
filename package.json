@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsup",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "test": "node --import tsx/esm --test tests/scaffold.test.ts tests/auth.test.ts tests/options-schema.test.ts tests/multi-instance.test.ts tests/fetch-interceptor.test.ts tests/provider.test.ts tests/gemini-sanitize.test.ts tests/combos.test.ts tests/config-shim.test.ts tests/features.test.ts tests/feature-defaults.test.ts tests/usable-combo.test.ts tests/disk-snapshot-perms.test.ts tests/fork-features.test.ts tests/auto-combo-context.test.ts tests/provider-id-routing.test.ts tests/management-read-token.test.ts tests/auto-sync.test.ts tests/context-lcd.test.ts tests/bare-key.test.ts tests/auto-combo-naming.test.ts tests/last-known-good.test.ts tests/active-only-sync.test.ts",
+    "test": "node --import tsx/esm --test tests/scaffold.test.ts tests/auth.test.ts tests/options-schema.test.ts tests/multi-instance.test.ts tests/fetch-interceptor.test.ts tests/provider.test.ts tests/gemini-sanitize.test.ts tests/combos.test.ts tests/config-shim.test.ts tests/features.test.ts tests/feature-defaults.test.ts tests/usable-combo.test.ts tests/disk-snapshot-perms.test.ts tests/fork-features.test.ts tests/auto-combo-context.test.ts tests/provider-id-routing.test.ts tests/management-read-token.test.ts tests/auto-sync.test.ts tests/startup-sync.test.ts tests/context-lcd.test.ts tests/bare-key.test.ts tests/auto-combo-naming.test.ts tests/last-known-good.test.ts tests/active-only-sync.test.ts",
     "prepublishOnly": "npm run clean && npm run build && npm test"
   },
   "keywords": [
@@ -60,6 +60,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@colbymchenry/codegraph": "^1.5.0",
     "@opencode-ai/plugin": "^1.15.6",
     "@types/node": "^22.19.19",
     "tsup": "^8.5.1",
