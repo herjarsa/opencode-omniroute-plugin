@@ -18,14 +18,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  resolveOmniRoutePluginOptions,
-  forceSyncOmniRouteModels,
-  createOmniRouteProviderHook,
-  createOmniRouteConfigHook,
+resolveOmniRoutePluginOptions,
+forceSyncOmniRouteModels,
+createOmniRouteProviderHook,
+createOmniRouteConfigHook,
   defaultDiskSnapshotWriter,
-  modelsCacheKey,
-  type OmniRouteFetchCache,
-  type OmniRouteRawModelEntry,
+  noopDiskSnapshotReader,
+modelsCacheKey,
+type OmniRouteFetchCache,
+type OmniRouteRawModelEntry,
 } from "../src/index.js";
 
 const BASE_URL = "https://or.example/v1";
@@ -196,7 +197,7 @@ test("provider hook: empty fetch after TTL expiry keeps previous models", async 
       baseURL: BASE_URL,
       features: { combos: false, autoCombos: false, enrichment: false, providerTag: false },
     },
-    { fetcher, cache, now }
+    { fetcher, cache, now, diskSnapshotReader: noopDiskSnapshotReader }
   );
   const provider = { options: { baseURL: BASE_URL } };
   const ctx = { auth: { type: "api", key: API_KEY } };

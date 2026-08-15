@@ -3210,7 +3210,9 @@ export function createOmniRouteProviderHook(
     compressionMetaFetcher?: OmniRouteCompressionMetaFetcher;
     providersFetcher?: OmniRouteProvidersFetcher;
     activeModelsFetcher?: OmniRouteActiveModelsFetcher;
-    now?: () => number;
+
+    diskSnapshotReader?: OmniRouteDiskSnapshotReader;
+now?: () => number;
     cache?: OmniRouteFetchCache;
   } = {}
 ): ProviderHook {
@@ -3227,6 +3229,7 @@ export function createOmniRouteProviderHook(
     deps.compressionMetaFetcher ?? defaultOmniRouteCompressionMetaFetcher;
   const providersFetcher = deps.providersFetcher ?? defaultOmniRouteProvidersFetcher;
   const activeModelsFetcher = deps.activeModelsFetcher ?? defaultOmniRouteActiveModelsFetcher;
+const diskSnapshotReader = deps.diskSnapshotReader ?? defaultDiskSnapshotReader;
   // Features defaults (mirror v0.1.0 behavior when unset).
   const features = resolved.features ?? {};
   const wantCombos = features.combos !== false;
@@ -3299,13 +3302,13 @@ export function createOmniRouteProviderHook(
       const t = now();
       const cached = cache.get(cacheKey);
 
-      let rawModels: OmniRouteRawModelEntry[];
-      let rawCombos: OmniRouteRawCombo[];
-      let rawAutoCombos: OmniRouteRawAutoCombo[];
-      let rawEnrichment: OmniRouteEnrichmentMap;
-      let rawCompressionCombos: OmniRouteCompressionCombo[];
-      let rawConnections: OmniRouteProviderConnection[];
-      let rawActiveIds: Set<string> = new Set();
+      let rawModels: OmniRouteRawModelEntry[] = [];
+      let rawCombos: OmniRouteRawCombo[] = [];
+      let rawAutoCombos: OmniRouteRawAutoCombo[] = [];
+      let rawEnrichment: OmniRouteEnrichmentMap = new Map();
+      let rawCompressionCombos: OmniRouteCompressionCombo[] = [];
+      let rawConnections: OmniRouteProviderConnection[] = [];
+let rawActiveIds: Set<string> = new Set();
       if (cached && cached.expiresAt > t) {
         rawModels = cached.rawModels;
         rawCombos = cached.rawCombos;
@@ -3315,162 +3318,193 @@ export function createOmniRouteProviderHook(
         rawConnections = cached.rawConnections;
         rawActiveIds = cached.activeModelIds ?? new Set();
       } else {
-        // Last-known-good source: the previous entry may be expired, but it
-        // is still a better answer than an empty fresh fetch.
-        const prevEntry = cache.get(cacheKey);
-        // Models fetch is required (no catalog otherwise → silent provider
-        // disappearance). We do NOT wrap this in a try; let the error
-        // propagate to OC's UI.
-        rawModels = await fetcher(baseURL, apiKey, 10_000);
-
-        // T-05: combos fetch is best-effort, gated by features.combos.
-        // Soft-fail on any error: emit a console.warn and fall back to a
-        // models-only catalog. Rationale: /api/combos requires a
-        // management-scoped key and OmniRoute may not have any combos
-        // provisioned. Hard-failing when combos are optional would
-        // silently hide the whole provider from OC's picker.
-        rawCombos = [];
-        if (wantCombos) {
-          try {
-            rawCombos = await combosFetcher(baseURL, managementReadToken, 10_000);
-          } catch (err) {
-            console.warn(
-              "[omniroute-plugin] combos fetch failed, falling back to models-only catalog",
-              err
-            );
-          }
-        }
-
-        // Auto combos fetch — virtual server-side combos. Best-effort,
-        // gated by features.autoCombos. Soft-fails silently (the endpoint
-        // may not exist yet on older OmniRoute versions).
-        rawAutoCombos = [];
-        if (wantAutoCombos) {
-          try {
-            rawAutoCombos = await autoCombosFetcher(baseURL, managementReadToken, 5_000);
-          } catch {
-            // Already handled inside the default fetcher — this catch
-            // is belt-and-suspenders for injected stubs.
-          }
-        }
-
-        // Enrichment fetch (nice names + pricing). Best-effort, gated by
-        // features.enrichment. Soft-fails to empty map.
-        rawEnrichment = new Map();
-        if (wantEnrichment) {
-          try {
-            rawEnrichment = await enrichmentFetcher(baseURL, managementReadToken, 10_000);
-          } catch (err) {
-            console.warn(
-              "[omniroute-plugin] enrichment fetch failed, falling back to raw ids",
-              err
-            );
-          }
-        }
-
-        // Compression metadata fetch. Off by default, gated by
-        // features.compressionMetadata. Soft-fails to empty array.
-        rawCompressionCombos = [];
-        if (wantCompressionMeta) {
-          try {
-            rawCompressionCombos = await compressionMetaFetcher(
-              baseURL,
-              managementReadToken,
-              10_000
-            );
-          } catch (err) {
-            console.warn("[omniroute-plugin] compression-metadata fetch failed", err);
-          }
-        }
-
-        // Provider-connections fetch. Off by default, gated by
-        // features.usableOnly. Soft-fails to empty array — when the
-        // connection table is unreadable we skip the filter entirely
-        // (subtract-filter semantics: don't drop everything we couldn't
-        // verify).
-        rawConnections = [];
-        if (wantUsableOnly) {
-          try {
-            rawConnections = await providersFetcher(baseURL, managementReadToken, 10_000);
-          } catch (err) {
-            console.warn(
-              "[omniroute-plugin] /api/providers fetch failed; usableOnly filter disabled for this refresh",
-              err
-            );
-          }
-        }
-
-        // Dashboard-active models fetch. Off by default, gated by
-        // features.activeOnly. Soft-fails to empty set — when the
-        // dashboard list is unreadable we keep the full catalog.
-        rawActiveIds = new Set();
-        if (wantActiveOnly) {
-          try {
-            rawActiveIds = await activeModelsFetcher(baseURL, managementReadToken, 10_000);
-          } catch (err) {
-            console.warn(
-              "[omniroute-plugin] /api/models fetch failed; activeOnly filter disabled for this refresh",
-              err
-            );
-          }
-        }
-
-        // Empty-refresh guard (same rationale as forceSync): a gateway that
-        // answers 200 with a non-parseable body yields rawModels === [].
-        // Overwriting the cache with that would blank the picker until the
-        // next healthy refresh — keep the last-known-good entry instead.
-        if (rawModels.length === 0 && prevEntry && prevEntry.rawModels.length > 0) {
-          console.warn(
-            `[omniroute-plugin] provider.models(${resolved.providerId}): /v1/models returned 0 models; ` +
-              `preserving last-known-good catalog (${prevEntry.rawModels.length} models)`,
-          );
-          rawModels = prevEntry.rawModels;
-          rawCombos = prevEntry.rawCombos;
-          rawAutoCombos = prevEntry.rawAutoCombos;
-          rawEnrichment = prevEntry.rawEnrichment;
-          rawCompressionCombos = prevEntry.rawCompressionCombos;
-          rawConnections = prevEntry.rawConnections;
-          rawActiveIds = prevEntry.activeModelIds ?? new Set();
-        }
-
-        cache.set(cacheKey, {
-          rawModels,
-          rawCombos,
-          rawAutoCombos,
-          rawEnrichment,
-          rawCompressionCombos,
-          rawConnections,
-          activeModelIds: rawActiveIds,
-          expiresAt: t + resolved.modelCacheTtl,
-        });
-
-        // Debug breadcrumb: surface fetch result so operators can confirm
-        // the dynamic pipeline fired and how much catalog OmniRoute returned.
-        // Emitted once per cache miss (TTL refresh) — quiet on cache hits.
-        console.warn(
-          `[omniroute-plugin] catalog refreshed for providerId=${resolved.providerId} baseURL=${baseURL}: ` +
-            `${rawModels.length} models + ${rawCombos.length} combos + ` +
-            `${rawEnrichment.size} enrichment entries + ` +
-            `${rawCompressionCombos.length} compression combos + ` +
-            `${rawConnections.length} connections ` +
-            `(TTL=${resolved.modelCacheTtl}ms)`
+      // Snapshot-first: hydrate from disk snapshot when valid; avoids 7
+      // sequential network fetches at plugin init, which bun's plugin host
+      // can abort mid-shutdown (DOMException code 20) and crash OC. Also
+      // avoids the 5-10s/endpoint timeout pile-up the user reported as
+      // "super lento al iniciar". This is the SECOND cold-fetch path
+      // (provider hook) that the config-shim 0.2.8 fix didn't cover.
+      let hydratedFromSnapshot = false;
+      if (features.diskCache !== false) {
+        const fingerprint = diskSnapshotIdentityFingerprint(
+          baseURL,
+          apiKey,
+          managementReadToken,
         );
-
-        // ── Startup debug: deep-dive into enrichment + auto combos ──────
-        if (resolved.features?.startupDebug === true) {
-          await writeStartupDiagnostics({
-            providerId: resolved.providerId,
-            baseURL,
-            modelCount: rawModels.length,
-            comboCount: rawCombos.length,
-            enrichmentSize: rawEnrichment.size,
-            autoComboCount: rawAutoCombos.length,
-            enrichment: rawEnrichment,
-            autoCombos: rawAutoCombos,
-            features: resolved.features,
-          });
+        const snapshot = await diskSnapshotReader(resolved.providerId, fingerprint);
+        if (snapshot && snapshot.rawModels.length > 0) {
+          rawModels = snapshot.rawModels;
+          rawCombos = snapshot.rawCombos;
+          rawAutoCombos = snapshot.rawAutoCombos ?? [];
+          rawEnrichment = snapshot.rawEnrichment;
+          rawCompressionCombos = snapshot.rawCompressionCombos;
+          rawConnections = snapshot.rawConnections;
+          rawActiveIds = snapshot.activeModelIds ?? new Set();
+          hydratedFromSnapshot = true;
+          console.warn(
+            `[omniroute-plugin] provider.models(${resolved.providerId}): hydrated from disk snapshot (${snapshot.rawModels.length} models); skipping live fetches to avoid init-time aborts`,
+          );
         }
       }
+      if (!hydratedFromSnapshot) {
+      // Last-known-good source: the previous entry may be expired, but it
+      // is still a better answer than an empty fresh fetch.
+      const prevEntry = cache.get(cacheKey);
+      // Models fetch is required (no catalog otherwise → silent provider
+      // disappearance). We do NOT wrap this in a try; let the error
+      // propagate to OC's UI.
+      rawModels = await fetcher(baseURL, apiKey, 10_000);
+
+      // T-05: combos fetch is best-effort, gated by features.combos.
+      // Soft-fail on any error: emit a console.warn and fall back to a
+      // models-only catalog. Rationale: /api/combos requires a
+      // management-scoped key and OmniRoute may not have any combos
+      // provisioned. Hard-failing when combos are optional would
+      // silently hide the whole provider from OC's picker.
+      rawCombos = [];
+      if (wantCombos) {
+        try {
+          rawCombos = await combosFetcher(baseURL, managementReadToken, 10_000);
+        } catch (err) {
+          console.warn(
+            "[omniroute-plugin] combos fetch failed, falling back to models-only catalog",
+            err
+          );
+        }
+      }
+
+      // Auto combos fetch — virtual server-side combos. Best-effort,
+      // gated by features.autoCombos. Soft-fails silently (the endpoint
+      // may not exist yet on older OmniRoute versions).
+      rawAutoCombos = [];
+      if (wantAutoCombos) {
+        try {
+          rawAutoCombos = await autoCombosFetcher(baseURL, managementReadToken, 5_000);
+        } catch {
+          // Already handled inside the default fetcher — this catch
+          // is belt-and-suspenders for injected stubs.
+        }
+      }
+
+      // Enrichment fetch (nice names + pricing). Best-effort, gated by
+      // features.enrichment. Soft-fails to empty map.
+      rawEnrichment = new Map();
+      if (wantEnrichment) {
+        try {
+          rawEnrichment = await enrichmentFetcher(baseURL, managementReadToken, 10_000);
+        } catch (err) {
+          console.warn(
+            "[omniroute-plugin] enrichment fetch failed, falling back to raw ids",
+            err
+          );
+        }
+      }
+
+      // Compression metadata fetch. Off by default, gated by
+      // features.compressionMetadata. Soft-fails to empty array.
+      rawCompressionCombos = [];
+      if (wantCompressionMeta) {
+        try {
+          rawCompressionCombos = await compressionMetaFetcher(
+            baseURL,
+            managementReadToken,
+            10_000
+          );
+        } catch (err) {
+          console.warn("[omniroute-plugin] compression-metadata fetch failed", err);
+        }
+      }
+
+      // Provider-connections fetch. Off by default, gated by
+      // features.usableOnly. Soft-fails to empty array — when the
+      // connection table is unreadable we skip the filter entirely
+      // (subtract-filter semantics: don't drop everything we couldn't
+      // verify).
+      rawConnections = [];
+      if (wantUsableOnly) {
+        try {
+          rawConnections = await providersFetcher(baseURL, managementReadToken, 10_000);
+        } catch (err) {
+          console.warn(
+            "[omniroute-plugin] /api/providers fetch failed; usableOnly filter disabled for this refresh",
+            err
+          );
+        }
+      }
+
+      // Dashboard-active models fetch. Off by default, gated by
+      // features.activeOnly. Soft-fails to empty set — when the
+      // dashboard list is unreadable we keep the full catalog.
+      rawActiveIds = new Set();
+      if (wantActiveOnly) {
+        try {
+          rawActiveIds = await activeModelsFetcher(baseURL, managementReadToken, 10_000);
+        } catch (err) {
+          console.warn(
+            "[omniroute-plugin] /api/models fetch failed; activeOnly filter disabled for this refresh",
+            err
+          );
+        }
+      }
+
+      // Empty-refresh guard (same rationale as forceSync): a gateway that
+      // answers 200 with a non-parseable body yields rawModels === [].
+      // Overwriting the cache with that would blank the picker until the
+      // next healthy refresh — keep the last-known-good entry instead.
+      if (rawModels.length === 0 && prevEntry && prevEntry.rawModels.length > 0) {
+        console.warn(
+          `[omniroute-plugin] provider.models(${resolved.providerId}): /v1/models returned 0 models; ` +
+            `preserving last-known-good catalog (${prevEntry.rawModels.length} models)`,
+        );
+        rawModels = prevEntry.rawModels;
+        rawCombos = prevEntry.rawCombos;
+        rawAutoCombos = prevEntry.rawAutoCombos;
+        rawEnrichment = prevEntry.rawEnrichment;
+        rawCompressionCombos = prevEntry.rawCompressionCombos;
+        rawConnections = prevEntry.rawConnections;
+        rawActiveIds = prevEntry.activeModelIds ?? new Set();
+      }
+      }
+
+      cache.set(cacheKey, {
+        rawModels,
+        rawCombos,
+        rawAutoCombos,
+        rawEnrichment,
+        rawCompressionCombos,
+        rawConnections,
+        activeModelIds: rawActiveIds,
+        expiresAt: t + resolved.modelCacheTtl,
+      });
+
+      // Debug breadcrumb: surface fetch result so operators can confirm
+      // the dynamic pipeline fired and how much catalog OmniRoute returned.
+      // Emitted once per cache miss (TTL refresh) — quiet on cache hits.
+      console.warn(
+        `[omniroute-plugin] catalog refreshed for providerId=${resolved.providerId} baseURL=${baseURL}: ` +
+          `${rawModels.length} models + ${rawCombos.length} combos + ` +
+          `${rawEnrichment.size} enrichment entries + ` +
+          `${rawCompressionCombos.length} compression combos + ` +
+          `${rawConnections.length} connections ` +
+          `(TTL=${resolved.modelCacheTtl}ms)`
+      );
+
+      // ── Startup debug: deep-dive into enrichment + auto combos ──────
+      if (resolved.features?.startupDebug === true) {
+        await writeStartupDiagnostics({
+          providerId: resolved.providerId,
+          baseURL,
+          modelCount: rawModels.length,
+          comboCount: rawCombos.length,
+          enrichmentSize: rawEnrichment.size,
+          autoComboCount: rawAutoCombos.length,
+          enrichment: rawEnrichment,
+          autoCombos: rawAutoCombos,
+          features: resolved.features,
+        });
+      }
+    }
+
 
       // Lookup index for LCD member resolution: O(1) per member lookup.
       // Indexed by raw model `id` — combo steps reference this exact

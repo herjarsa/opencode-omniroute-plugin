@@ -21,6 +21,7 @@ import {
   createOmniRouteConfigHook,
   defaultDiskSnapshotWriter,
   defaultDiskSnapshotReader,
+  noopDiskSnapshotReader,
   type OmniRouteFetchCache,
   type OmniRouteRawModelEntry,
 } from "../src/index.js";
@@ -206,7 +207,7 @@ test("provider hook: catalog stable after forceSync with activeOnly", async () =
         providerTag: false,
       },
     },
-    { fetcher: async () => [MODEL_A, MODEL_B], activeModelsFetcher: activeFetcher, cache, now }
+    { fetcher: async () => [MODEL_A, MODEL_B], activeModelsFetcher: activeFetcher, cache, now, diskSnapshotReader: noopDiskSnapshotReader }
   );
   const provider = { options: { baseURL: BASE_URL } };
   const ctx = { auth: { type: "api", key: API_KEY } };
