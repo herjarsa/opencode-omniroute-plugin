@@ -4511,7 +4511,22 @@ export function buildStaticProviderEntry(
     // Skip canonical-named twins when the alias-keyed enriched row exists.
     if (canonicalDedup.has(raw.id)) continue;
     if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
-    if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !activeModelIds.has(raw.id)) continue;
+    if (wantActiveOnly && connections && connections.length > 0) {
+      // Build active provider set from connections (isActive: true, regardless of testStatus).
+      // This replaces the broken /api/models endpoint which uses wrong provider prefixes.
+      const activeProviders = new Set<string>();
+      for (const conn of connections) {
+        if (conn?.isActive === true) activeProviders.add(conn.provider);
+      }
+      if (activeProviders.size > 0) {
+        const slash = raw.id.indexOf('/');
+        const prefix = slash > 0 ? raw.id.slice(0, slash) : '';
+        if (!activeProviders.has(prefix)) continue;
+      }
+    } else if (wantActiveOnly && activeModelIds && activeModelIds.size > 0) {
+      // Fallback: use activeModelIds from /api/models if no connections available.
+      if (!activeModelIds.has(raw.id)) continue;
+    }
     const caps = raw.capabilities ?? {};
     // Enrichment overlay: `/api/pricing/models` carries human display names
     // (e.g. "Claude Opus 4.7" for raw id "cc/claude-opus-4-7"). The OC TUI
