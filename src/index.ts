@@ -750,82 +750,6 @@ async function loadPreviousModelIds(args: {
 }
 
 /**
- * HYDRATE CACHE FROM DISK - FAST PATH
- *
- * Reads disk cache and populates in-memory cache INSTANTLY at plugin init.
- * This runs BEFORE any network requests, so OpenCode gets local data
- * immediately without waiting for OmniRoute to respond.
- *
- * This is the key optimization: disk cache is read first,
- * THEN network sync runs in background only if needed.
- *
- * Returns number of models loaded from cache (0 if no cache).
- */
-export async function warmCacheFromDisk(args: {
-  resolved: ResolvedOmniRoutePluginOptions;
-  cache: OmniRouteFetchCache;
-  readAuthJson?: OmniRouteReadAuthJson;
-}): Promise<number> {
-  const wantDiskCache = (args.resolved.features ?? {}).diskCache !== false;
-  if (!wantDiskCache) return 0;
-
-  // Resolve auth to get the fingerprint
-  const auth = await resolveOmniRouteRuntimeAuth(args.resolved, args.readAuthJson);
-  if (!auth) {
-    return 0; // No credentials yet - will be populated on first sync
-  }
-
-  try {
-    const fingerprint = diskSnapshotIdentityFingerprint(
-      auth.baseURL,
-      auth.apiKey,
-      auth.managementReadToken,
-    );
-    const snapshot = await defaultDiskSnapshotReader(args.resolved.providerId, fingerprint);
-    if (!snapshot || snapshot.rawModels.length === 0) {
-      return 0; // No disk cache
-    }
-
-    // Build cache key
-    const cacheKey = modelsCacheKey(
-      auth.baseURL,
-      `${auth.apiKey}\0${auth.managementReadToken}`,
-    );
-
-    // Check if cache is already populated
-    const existing = args.cache.get(cacheKey);
-    if (existing && existing.rawModels.length > 0) {
-      return existing.rawModels.length; // Already have data
-    }
-
-    // Calculate expiry from stored entry
-    const ttl = args.resolved.modelCacheTtl;
-    const expiresAt = Date.now() + ttl;
-
-    // Hydrate in-memory cache from disk snapshot
-    const entry: OmniRouteFetchCacheEntry = {
-      rawModels: snapshot.rawModels,
-      rawCombos: snapshot.rawCombos ?? [],
-      rawAutoCombos: snapshot.rawAutoCombos ?? [],
-      rawEnrichment: snapshot.rawEnrichment ?? new Map(),
-      rawCompressionCombos: snapshot.rawCompressionCombos ?? [],
-      rawConnections: snapshot.rawConnections ?? [],
-      activeModelIds: snapshot.activeModelIds ?? new Set(),
-      expiresAt,
-    };
-    args.cache.set(cacheKey, entry);
-
-    _logger.debug(
-      `[omniroute-plugin] warmCacheFromDisk: loaded ${snapshot.rawModels.length} models from disk for ${args.resolved.providerId}`
-    );
-
-    return snapshot.rawModels.length;
-  } catch {
-    // Soft-fail: no disk cache available
-    return 0;
-  }
-}
-
 /**
  * Force-refresh OmniRoute catalog: clear memory + disk cache, re-fetch /v1/models
  * (and optional management endpoints), and repopulate the shared cache.
@@ -1247,10 +1171,12 @@ export const OmniRoutePlugin: Plugin = async (_input, options) => {
   // bun's plugin runtime when the timer fired mid-shutdown. Background
   // on-demand refresh is handled by `modelCacheTtl` on the provider hook.
 
-  // OPTIMIZATION: Hydrate cache from disk BEFORE any network request.
-  // This is the FAST PATH - OpenCode gets local data instantly without
-  // waiting for OmniRoute. Network sync runs in background after.
-  warmCacheFromDisk({ resolved, cache: sharedCache }).catch(() => { /* best-effort */ });
+  // One-shot startup sync: fetches /v1/models once at plugin init and only
+  // updates cache + disk snapshot if the catalog has new models compared to
+  // the previous (cache or disk snapshot). Replaces the periodic
+  // setInterval auto-sync that caused unhandled AbortError crashes in
+  // bun's plugin runtime when the timer fired mid-shutdown. Background
+  // on-demand refresh is handled by `modelCacheTtl` on the provider hook.
   runOmniRouteStartupSync({ resolved, cache: sharedCache });
 
   const syncTool = createOmniRouteSyncModelsTool({ resolved, cache: sharedCache });
