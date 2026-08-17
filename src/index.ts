@@ -5587,9 +5587,12 @@ export function createOmniRouteConfigHook(
         // models-only. Disk-cache fallback below recovers last-known-good
         // when the fetcher threw (network/403/timeout) AND diskCache !== false.
         let modelsFetchThrew = false;
+        let modelsFetchAborted = false;
         try {
           rawModels = await fetcher(baseURL, apiKey, 10_000);
         } catch (err) {
+          const errName = err && typeof err === "object" ? (err as { name?: string }).name : "";
+          modelsFetchAborted = errName === "AbortError";
           logger.warn(
             "[omniroute-plugin] config shim: /v1/models fetch failed; publishing stub provider entry",
             err
@@ -5597,6 +5600,15 @@ export function createOmniRouteConfigHook(
           rawModels = [];
           modelsFetchThrew = true;
         }
+        // bun's plugin runtime aborts in-flight fetches when the plugin load
+        // completes (AbortError code 20). Publishing a stub with empty models
+        // is worse than publishing nothing - the provider hook runs on-demand
+        // after init and can fetch safely. Bail out early so the dynamic
+        // hook populates the catalog instead of an empty stub.
+        if (modelsFetchAborted && !cached) {
+          return;
+        }
+        
         modelsFetchOk = !modelsFetchThrew && rawModels.length > 0;
 
         rawCombos = [];
