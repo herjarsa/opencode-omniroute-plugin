@@ -3036,6 +3036,32 @@ export function isUsableRawModelId(
 }
 
 /**
+ * Decide whether a raw model id should pass the `activeOnly` filter.
+ * 
+ * OmniRoute's `/api/models` returns IDs with extra sub-paths that don't
+ * match `/v1/models` IDs (e.g. `kc/anthropic/claude-opus-4.7` vs
+ * `kc/claude-opus-4.7`). This function does smart matching by:
+ * 1. Exact match
+ * 2. Strip the last sub-path segment (e.g. kc/anthropic/x -> kc/x)
+ * 3. Strip all sub-paths (e.g. kc/a/b/x -> kc/x)
+ */
+export function matchesActiveId(rawId: string, activeIds: Set<string>): boolean {
+  if (activeIds.has(rawId)) return true;
+  const slashIdx = rawId.indexOf("/");
+  if (slashIdx <= 0) return false;
+  const prefix = rawId.slice(0, slashIdx);
+  const rest = rawId.slice(slashIdx + 1);
+  // Try stripping the last sub-path segment
+  const lastSlash = rest.lastIndexOf("/");
+  if (lastSlash > 0) {
+    const candidate = prefix + "/" + rest.slice(lastSlash + 1);
+    if (activeIds.has(candidate)) return true;
+  }
+  // Try without any sub-paths
+  return activeIds.has(prefix + "/" + rest);
+}
+
+/**
  * Decide whether a combo passes the `usableOnly` filter. A combo keeps
  * when AT LEAST ONE of its members maps to a usable canonical provider.
  * Combos with zero resolvable members pass through (already degraded to
@@ -4511,22 +4537,7 @@ export function buildStaticProviderEntry(
     // Skip canonical-named twins when the alias-keyed enriched row exists.
     if (canonicalDedup.has(raw.id)) continue;
     if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
-    if (wantActiveOnly && connections && connections.length > 0) {
-      // Build active provider set from connections (isActive: true, regardless of testStatus).
-      // This replaces the broken /api/models endpoint which uses wrong provider prefixes.
-      const activeProviders = new Set<string>();
-      for (const conn of connections) {
-        if (conn?.isActive === true) activeProviders.add(conn.provider);
-      }
-      if (activeProviders.size > 0) {
-        const slash = raw.id.indexOf('/');
-        const prefix = slash > 0 ? raw.id.slice(0, slash) : '';
-        if (!activeProviders.has(prefix)) continue;
-      }
-    } else if (wantActiveOnly && activeModelIds && activeModelIds.size > 0) {
-      // Fallback: use activeModelIds from /api/models if no connections available.
-      if (!activeModelIds.has(raw.id)) continue;
-    }
+    if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !matchesActiveId(raw.id, activeModelIds)) continue;
     const caps = raw.capabilities ?? {};
     // Enrichment overlay: `/api/pricing/models` carries human display names
     // (e.g. "Claude Opus 4.7" for raw id "cc/claude-opus-4-7"). The OC TUI
