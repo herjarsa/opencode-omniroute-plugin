@@ -876,6 +876,32 @@ export async function forceSyncOmniRouteModels(args: {
         diskSnapshotReader,
       });
       if (prevIds && sameModelIdSet(prevIds, rawModels)) {
+        // Even when the catalog is unchanged, activeModelIds may have
+        // changed independently (models toggled on/off in the dashboard).
+        // Fetch and update them so the activeOnly filter stays current.
+        if (wantActiveOnly) {
+          try {
+            const freshActiveIds = await activeModelsFetcher(
+              auth.baseURL,
+              auth.managementReadToken,
+              10_000,
+            );
+            if (freshActiveIds.size > 0) {
+              const cached = cache.get(cacheKey);
+              if (cached) cached.activeModelIds = freshActiveIds;
+              if (wantDiskCache) {
+                const fp = diskSnapshotIdentityFingerprint(auth.baseURL, auth.apiKey, auth.managementReadToken);
+                const snap = await diskSnapshotReader(resolved.providerId, fp);
+                if (snap) {
+                  snap.activeModelIds = freshActiveIds;
+                  await defaultDiskSnapshotWriter(resolved.providerId, snap, fp);
+                }
+              }
+            }
+          } catch {
+            // Soft-fail: keep previous activeModelIds.
+          }
+        }
         return {
           ok: true,
           count: rawModels.length,
