@@ -1197,13 +1197,14 @@ export const OmniRoutePlugin: Plugin = async (_input, options) => {
   // bun's plugin runtime when the timer fired mid-shutdown. Background
   // on-demand refresh is handled by `modelCacheTtl` on the provider hook.
 
-  // One-shot startup sync: fetches /v1/models once at plugin init and only
-  // updates cache + disk snapshot if the catalog has new models compared to
-  // the previous (cache or disk snapshot). Replaces the periodic
-  // setInterval auto-sync that caused unhandled AbortError crashes in
-  // bun's plugin runtime when the timer fired mid-shutdown. Background
-  // on-demand refresh is handled by `modelCacheTtl` on the provider hook.
-  runOmniRouteStartupSync({ resolved, cache: sharedCache });
+  // Defer startup sync to next tick to escape bun's plugin AbortSignal context.
+  // bun aborts all in-flight fetches when plugin load completes (AbortError code 20).
+  // By deferring, the sync runs AFTER plugin load, so fetches won't be aborted.
+  // The provider hook loads from disk snapshot immediately (no network wait),
+  // so OpenCode gets models instantly. The sync updates activeModelIds in background.
+  setImmediate(() => {
+    runOmniRouteStartupSync({ resolved, cache: sharedCache });
+  });
 
   const syncTool = createOmniRouteSyncModelsTool({ resolved, cache: sharedCache });
   const bareProviderId = resolved.omnirouteProviderId;
