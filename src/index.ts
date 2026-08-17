@@ -3036,29 +3036,15 @@ export function isUsableRawModelId(
 }
 
 /**
- * Decide whether a raw model id should pass the `activeOnly` filter.
- * 
- * OmniRoute's `/api/models` returns IDs with extra sub-paths that don't
- * match `/v1/models` IDs (e.g. `kc/anthropic/claude-opus-4.7` vs
- * `kc/claude-opus-4.7`). This function does smart matching by:
- * 1. Exact match
- * 2. Strip the last sub-path segment (e.g. kc/anthropic/x -> kc/x)
- * 3. Strip all sub-paths (e.g. kc/a/b/x -> kc/x)
+ * Simple exact match for activeOnly filter.
+ *
+ * OmniRoute's /api/models endpoint returns IDs that may not match /v1/models
+ * IDs (different schema - see diegosouzapw/OmniRoute#10615).
+ * Until that's fixed upstream, activeOnly only shows models whose IDs match
+ * exactly. Users who want all models should set activeOnly:false in config.
  */
 export function matchesActiveId(rawId: string, activeIds: Set<string>): boolean {
-  if (activeIds.has(rawId)) return true;
-  const slashIdx = rawId.indexOf("/");
-  if (slashIdx <= 0) return false;
-  const prefix = rawId.slice(0, slashIdx);
-  const rest = rawId.slice(slashIdx + 1);
-  // Try stripping the last sub-path segment
-  const lastSlash = rest.lastIndexOf("/");
-  if (lastSlash > 0) {
-    const candidate = prefix + "/" + rest.slice(lastSlash + 1);
-    if (activeIds.has(candidate)) return true;
-  }
-  // Try without any sub-paths
-  return activeIds.has(prefix + "/" + rest);
+  return activeIds.has(rawId);
 }
 
 /**
@@ -4538,6 +4524,10 @@ export function buildStaticProviderEntry(
     if (canonicalDedup.has(raw.id)) continue;
     if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
     if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !matchesActiveId(raw.id, activeModelIds)) continue;
+    // Note: matchesActiveId uses smart matching because OmniRoute's
+    // /api/models returns IDs with extra sub-paths that don't match /v1/models.
+    // If no match found, the model is hidden. Users who want all models
+    // should set activeOnly: false in their config.
     const caps = raw.capabilities ?? {};
     // Enrichment overlay: `/api/pricing/models` carries human display names
     // (e.g. "Claude Opus 4.7" for raw id "cc/claude-opus-4-7"). The OC TUI
