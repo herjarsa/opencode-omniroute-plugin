@@ -841,16 +841,32 @@ export async function forceSyncOmniRouteModels(args: {
       `${auth.apiKey}\0${auth.managementReadToken}`,
     );
 
+    // Version-bump invalidation: if the in-memory cache or disk snapshot
+    // was written by an older plugin version, force a fresh fetch. This
+    // prevents stale enabledProviderSet data from persisting across plugin
+    // upgrades (e.g. v0.2.16 → v0.2.20).
+    const prevEntry = cache.get(cacheKey);
+    if (prevEntry && prevEntry.rawModels.length > 0) {
+      const snapshotVersion = (prevEntry as any).pluginVersion ?? "unknown";
+      if (snapshotVersion !== PLUGIN_VERSION && snapshotVersion !== "unknown") {
+        console.warn(
+          `[omniroute-plugin] force sync: plugin version changed (${snapshotVersion} → ${PLUGIN_VERSION}), invalidating stale cache for providerId=${resolved.providerId}`,
+        );
+        cache.delete(cacheKey);
+        if (wantDiskCache) await clearDiskSnapshot(resolved.providerId);
+      }
+    }
     // Last-known-good: un gateway que responde 200 con un body no parseable
     // produce rawModels === [] SIN lanzar. Sobrescribir cache y snapshot con
     // ese catálogo vacío vaciaría el picker (quedarían solo combos/autos)
     // hasta el siguiente tick sano — la intermitencia reportada. Conservamos
     // la entrada previa cuando tenía modelos y reportamos preserved=true.
-    const prevEntry = cache.get(cacheKey);
-    if (rawModels.length === 0 && prevEntry && prevEntry.rawModels.length > 0) {
+    const lastKnownGood = cache.get(cacheKey);
+    if (rawModels.length === 0 && lastKnownGood && lastKnownGood.rawModels.length > 0) {
       console.warn(
-        `[omniroute-plugin] force sync: /v1/models returned 0 models for providerId=${resolved.providerId}; ` +
-          `preserving last-known-good catalog (${prevEntry.rawModels.length} models)`,
+        `[omniroute-plugin] force sync: /v1/models returned 0 models for providerId=${resolved.providerId};
+          ` +
+          `preserving last-known-good catalog (${lastKnownGood.rawModels.length} models)`,
       );
       return {
         ok: true,
@@ -1006,9 +1022,7 @@ export async function forceSyncOmniRouteModels(args: {
     // Derive enabled-provider alias set from the connections we just fetched.
     // Soft-fail: empty connections OR feature off → undefined → filter disabled.
     const enabledProviderSet =
-      wantEnabledOnly && rawConnections.length > 0
-        ? enabledProviderAliasSet(rawConnections, rawEnrichment)
-        : undefined;
+      wantEnabledOnly && rawActiveIds.size > 0 ? rawActiveIds : undefined;
     const entry = {
       rawModels,
       rawCombos,
@@ -3043,8 +3057,6 @@ export function enabledProviderAliasSet(
   const enabledCanonicals = new Set<string>();
   for (const c of connections) {
     if (!c || c.isActive !== true) continue;
-    // Intentionally NO testStatus check — that's the only difference vs
-    // usableProviderAliasSet. Active-but-failed-test providers stay in.
     if (typeof c.provider === "string" && c.provider.length > 0) {
       enabledCanonicals.add(c.provider);
     }
@@ -3061,8 +3073,6 @@ export function enabledProviderAliasSet(
       if (enabledCanonicals.has(canonical)) aliases.add(alias);
     }
   }
-  // Always include every enabled canonical as an alias too — handles the
-  // common case where `/v1/models` ids use the canonical id directly.
   for (const canonical of enabledCanonicals) aliases.add(canonical);
   return { aliases, canonicals: enabledCanonicals, knownAliases };
 }
@@ -3112,25 +3122,17 @@ export function isUsableRawModelId(
  *   - prefix is known to the enrichment map BUT not in enabled set → drop.
  *
  * Pure function — exported so static + dynamic hooks share the same
- * verdict logic without divergence. Pair with `enabledProviderAliasSet`,
+ * verdict logic without divergence. Pair with `enabledProviderCanonicals`,
  * which is the analog of `usableProviderAliasSet` minus the testStatus gate.
  */
 export function isEnabledRawModelId(
   id: string,
-  enabled: {
-    aliases: Set<string>;
-    canonicals: Set<string>;
-    knownAliases: Set<string>;
-  },
+  enabledProviders: Set<string>,
   enrichment: OmniRouteEnrichmentMap | undefined
 ): boolean {
   const slash = id.indexOf("/");
   const prefix = slash <= 0 ? id : id.slice(0, slash);
-  if (enabled.aliases.has(prefix) || enabled.canonicals.has(prefix)) return true;
-  // Strict filter: unknown prefixes (including bare names without a "/") are
-  // DROPPED. This prevents hardcoded models from unconfigured providers
- // (e.g. uppercase names like "EXPLORE", "KIRO AI") leaking through.
-  return false;
+  return enabledProviders.has(prefix);
 }
 
 /**
@@ -3289,15 +3291,11 @@ export interface OmniRouteFetchCacheEntry {
   /** Dashboard-active model ids from /api/models (available=true). Optional: absent in old disk snapshots. */
   activeModelIds?: Set<string>;
   /**
-   * Derived alias set for `features.enabledOnly` (providers whose
-   * `isActive: true` in /api/providers, ignoring `testStatus`). Optional:
-   * undefined when the feature is off or the connections fetch soft-failed.
+   * Set of active model IDs from /api/models (available=true).
+   * Used by features.enabledOnly to filter models by per-model availability.
+   * Optional: undefined when the feature is off or the fetch soft-failed.
    */
-  enabledProviderSet?: {
-    aliases: Set<string>;
-    canonicals: Set<string>;
-    knownAliases: Set<string>;
-  };
+  enabledProviderSet?: Set<string>;
   expiresAt: number;
 }
 
@@ -3621,9 +3619,7 @@ let rawActiveIds: Set<string> = new Set();
       // connections we just fetched. Soft-fail: empty connections OR feature
       // off → undefined → filter disabled for this refresh.
       const enabledProviderSet =
-        wantEnabledOnly && rawConnections.length > 0
-          ? enabledProviderAliasSet(rawConnections, rawEnrichment)
-          : undefined;
+        wantEnabledOnly && rawActiveIds.size > 0 ? rawActiveIds : undefined;
 
       cache.set(cacheKey, {
         rawModels,
@@ -3687,9 +3683,7 @@ let rawActiveIds: Set<string> = new Set();
       // payload. Same soft-fail contract as `usable`: empty connections OR
       // feature off → undefined → filter disabled.
       const enabled =
-        wantEnabledOnly && rawConnections.length > 0
-          ? enabledProviderAliasSet(rawConnections, rawEnrichment)
-          : undefined;
+        wantEnabledOnly && rawActiveIds.size > 0 ? rawActiveIds : undefined;
 
       // Build the canonical→alias reverse map AND the canonical-dedup
       // set once per refresh. Together they fix the dual-keyed
@@ -4620,9 +4614,7 @@ export function buildStaticProviderEntry(
   // (empty connections) disables the filter rather than hiding the catalog.
   const wantEnabledOnly = opts.features?.enabledOnly === true;
   const enabled =
-    wantEnabledOnly && connections && connections.length > 0
-      ? enabledProviderAliasSet(connections, enrichment)
-      : undefined;
+    wantEnabledOnly && activeModelIds && activeModelIds.size > 0 ? activeModelIds : undefined;
   // Provider-tag suffix — default-on, opt-out via `features.providerTag: false`.
   // Prepends e.g. `Claude - ` to enriched raw-model names so the picker
   // can tell `cc/claude-opus-4-7` (Anthropic) apart from `kr/claude-opus-4-7`
@@ -5104,12 +5096,9 @@ interface OmniRouteDiskSnapshot {
          * arrays (Set is not JSON-friendly). Optional: absent when the
          * feature is off, the connections fetch soft-failed, or the
          * snapshot predates v0.2.19.
+         * Serialised as arrays (Set is not JSON-friendly).
          */
-        enabledProviderSet?: {
-          aliases: string[];
-          canonicals: string[];
-          knownAliases: string[];
-        };
+        enabledProviderSet?: string[];
         /** Plugin version that wrote the snapshot. Invalidate old snapshots on version bump. */
         pluginVersion: string;
         /** When the snapshot was written (epoch ms). */
@@ -5191,11 +5180,7 @@ export const defaultDiskSnapshotWriter: OmniRouteDiskSnapshotWriter = async (
       rawConnections: entry.rawConnections,
       activeModelIds: Array.from(entry.activeModelIds ?? []),
       enabledProviderSet: entry.enabledProviderSet
-        ? {
-            aliases: Array.from(entry.enabledProviderSet.aliases),
-            canonicals: Array.from(entry.enabledProviderSet.canonicals),
-            knownAliases: Array.from(entry.enabledProviderSet.knownAliases),
-          }
+        ? Array.from(entry.enabledProviderSet)
         : undefined,
       pluginVersion: PLUGIN_VERSION,
 writtenAt: Date.now(),
@@ -5241,23 +5226,7 @@ typeof parsed.identityFingerprint !== "string" ||
         Array.isArray(parsed.activeModelIds) ? parsed.activeModelIds : []
       ),
       enabledProviderSet: parsed.enabledProviderSet
-        ? {
-            aliases: new Set(
-              Array.isArray(parsed.enabledProviderSet.aliases)
-                ? parsed.enabledProviderSet.aliases
-                : []
-            ),
-            canonicals: new Set(
-              Array.isArray(parsed.enabledProviderSet.canonicals)
-                ? parsed.enabledProviderSet.canonicals
-                : []
-            ),
-            knownAliases: new Set(
-              Array.isArray(parsed.enabledProviderSet.knownAliases)
-                ? parsed.enabledProviderSet.knownAliases
-                : []
-            ),
-          }
+        ? new Set(parsed.enabledProviderSet)
         : undefined,
     };
   } catch {
@@ -5888,9 +5857,7 @@ export function createOmniRouteConfigHook(
       // connections we just fetched. Soft-fail: empty connections OR feature
       // off → undefined → filter disabled for this refresh.
       const enabledProviderSet =
-        wantEnabledOnly && rawConnections.length > 0
-          ? enabledProviderAliasSet(rawConnections, rawEnrichment)
-          : undefined;
+        wantEnabledOnly && rawActiveIds.size > 0 ? rawActiveIds : undefined;
 
       cache.set(cacheKey, {
         rawModels,
