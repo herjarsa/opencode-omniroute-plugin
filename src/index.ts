@@ -5110,10 +5110,11 @@ interface OmniRouteDiskSnapshot {
           canonicals: string[];
           knownAliases: string[];
         };
+        /** Plugin version that wrote the snapshot. Invalidate old snapshots on version bump. */
+        pluginVersion: string;
         /** When the snapshot was written (epoch ms). */
-  writtenAt: number;
-}
-
+        writtenAt: number;
+    }
 /** Resolve the disk-snapshot path for a given providerId. */
 export function diskSnapshotPath(providerId: string): string {
   const dir = process.env.OPENCODE_DATA_DIR ?? path.join(os.homedir(), ".local/share/opencode");
@@ -5196,8 +5197,9 @@ export const defaultDiskSnapshotWriter: OmniRouteDiskSnapshotWriter = async (
             knownAliases: Array.from(entry.enabledProviderSet.knownAliases),
           }
         : undefined,
-      writtenAt: Date.now(),
-    };
+      pluginVersion: PLUGIN_VERSION,
+writtenAt: Date.now(),
+};
     await writeFile(file, JSON.stringify(snapshot), {
       encoding: "utf8",
       mode: 0o600,
@@ -5216,12 +5218,14 @@ export const defaultDiskSnapshotReader: OmniRouteDiskSnapshotReader = async (
     const file = diskSnapshotPath(providerId);
     const body = await readFile(file, "utf8");
     const parsed = JSON.parse(body) as Partial<OmniRouteDiskSnapshot>;
-    if (
-      !parsed ||
-      parsed.v !== 2 ||
-      typeof parsed.identityFingerprint !== "string" ||
-      parsed.identityFingerprint !== identityFingerprint
-    ) {
+if (
+!parsed ||
+parsed.v !== 2 ||
+typeof parsed.identityFingerprint !== "string" ||
+      parsed.identityFingerprint !== identityFingerprint ||
+      typeof parsed.pluginVersion !== "string" ||
+      parsed.pluginVersion !== PLUGIN_VERSION
+) {
       return undefined;
     }
     return {
