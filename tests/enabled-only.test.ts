@@ -153,6 +153,7 @@ test("forceSync: enabledOnly=true stores enabledProviderSet in the cache entry",
     readAuthJson,
     fetcher: async () => [MODEL_KC, MODEL_KR, MODEL_M3],
     providersFetcher: providersFetcherAll,
+    activeModelsFetcher: async () => new Set([MODEL_KC.id, MODEL_KR.id, MODEL_M3.id]),
   });
 
   assert.equal(result.ok, true);
@@ -191,6 +192,7 @@ test("forceSync: provider with isActive=true but failed testStatus is included",
     readAuthJson,
     fetcher: async () => [MODEL_KC, MODEL_KR, MODEL_M3],
     providersFetcher: providersFetcherAll,
+    activeModelsFetcher: async () => new Set([MODEL_KC.id, MODEL_KR.id, MODEL_M3.id]),
   });
 
   const entry = [...cache.values()][0];
@@ -268,11 +270,7 @@ test("snapshot: enabledProviderSet survives writer → reader round-trip", async
         rawCompressionCombos: [],
         rawConnections: [],
         activeModelIds: new Set(),
-        enabledProviderSet: {
-          aliases: new Set(["kc", "kr", "minimax"]),
-          canonicals: new Set(["kilocode", "kiro", "minimax"]),
-          knownAliases: new Set(["kc", "kilocode", "kr", "kiro", "minimax", "openrouter"]),
-        },
+        enabledProviderSet: new Set(["kc", "kr", "minimax", "kilocode", "kiro"]),
       },
       fp
     );
@@ -284,12 +282,12 @@ test("snapshot: enabledProviderSet survives writer → reader round-trip", async
       "kc alias survives round-trip",
     );
     assert.ok(
-      read!.enabledProviderSet!.canonicals.has("minimax"),
-      "minimax canonical survives round-trip",
+      read!.enabledProviderSet!.has("minimax"),
+      "minimax survives round-trip",
     );
     assert.ok(
-      read!.enabledProviderSet!.knownAliases.has("openrouter"),
-      "openrouter knownAlias survives round-trip",
+      read!.enabledProviderSet!.has("openrouter"),
+      "openrouter survives round-trip",
     );
   } finally {
     if (previousDataDir === undefined) delete process.env.OPENCODE_DATA_DIR;
