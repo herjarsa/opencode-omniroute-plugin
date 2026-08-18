@@ -52,3 +52,42 @@
 - `src/index.ts` (2 gates + 1 export)
 - `tests/context-lcd.test.ts` (new)
 - `package.json` (test script list)
+
+---
+
+# PLAN — features.enabledOnly (provider-level active filter)
+
+**Repo**: herjarsa/opencode-omniroute-plugin
+**Goal**: Add an opt-in feature flag that filters `/v1/models` to providers with `isActive: true` in `/api/providers`, **ignoring `testStatus`**.
+
+## User motivation
+
+The existing `usableOnly` filter requires BOTH `isActive: true` AND `testStatus: "active"`. This is too strict for operators who want the model picker to mirror the OmniRoute dashboard's enable/disable switch (a UI toggle, persisted across restarts) instead of being coupled to the transient `testStatus` field (which flips to `unavailable`/`expired` for rate-limited or temporarily-broken providers the operator still wants visible).
+
+Combos and auto-combos have no enable/disable in the OmniRoute dashboard, so they always pass through.
+
+## Decision
+
+- **New opt-in flag `features.enabledOnly`, default-OFF** (no breaking change to existing configs).
+- Uses the same `rawConnections` fetch as `usableOnly` — no additional network round-trip.
+- `enabledProviderAliasSet` mirrors `usableProviderAliasSet` MINUS the `testStatus` gate. Same subtract-filter semantics.
+- `isEnabledRawModelId` is identical to `isUsableRawModelId` (re-uses the same shape and verdict logic).
+- **Combos always pass through** — no filter applied to combo entries (their provider membership doesn't matter for this filter).
+- Soft-fail: empty connections OR fetch throws → `enabledProviderSet` is undefined → filter disabled for the refresh, never hides the whole catalog.
+- Disk snapshot round-trips `enabledProviderSet` for offline resilience (matches the `activeModelIds` pattern).
+- Co-existence with `usableOnly`: when BOTH are on, the INTERSECTION applies — usableOnly's stricter testStatus check wins per provider.
+
+## Files touched
+
+- `src/index.ts`:
+  - `featuresSchema` (added `enabledOnly`)
+  - `OMNIROUTE_FEATURE_DEFAULTS` (added `enabledOnly: false`)
+  - New exports `enabledProviderAliasSet`, `isEnabledRawModelId`
+  - `OmniRouteFetchCacheEntry.enabledProviderSet` (new field)
+  - `OmniRouteDiskSnapshot.enabledProviderSet` (new field)
+  - `defaultDiskSnapshotWriter` / `defaultDiskSnapshotReader` (round-trip the new field)
+  - `forceSyncOmniRouteModels`, `createOmniRouteProviderHook`, `createOmniRouteConfigHook`: feature flag read + connections fetch gate (now fires when `wantUsableOnly || wantEnabledOnly`) + cache entry write
+  - `buildStaticProviderEntry`: filter application after the `usableOnly` filter
+- `tests/enabled-only.test.ts` (NEW): 10 tests (forceSync cache + soft-fail, snapshot round-trip, provider hook filtering, config hook filtering, catalog stability, enabledOnly+usableOnly intersection)
+- `package.json`: added `tests/enabled-only.test.ts` to `npm test`
+- `README.md`: features table row + example block + comparison with `usableOnly`

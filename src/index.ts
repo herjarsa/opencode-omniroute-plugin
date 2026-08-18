@@ -181,6 +181,7 @@ const featuresSchema = z
     fetchInterceptor: z.boolean().optional(),
     usableOnly: z.boolean().optional(),
     activeOnly: z.boolean().optional(),
+    enabledOnly: z.boolean().optional(),
     diskCache: z.boolean().optional(),
     providerTag: z.boolean().optional(),
     debugLog: z.boolean().optional(),
@@ -246,6 +247,7 @@ export const OMNIROUTE_FEATURE_DEFAULTS = {
   compressionMetadata: false,
   usableOnly: false,
   activeOnly: false,
+  enabledOnly: false,
   mcpAutoEmit: false,
   debugLog: false,
   startupDebug: false,
@@ -810,6 +812,7 @@ export async function forceSyncOmniRouteModels(args: {
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
   const wantActiveOnly = features.activeOnly === true;
+  const wantEnabledOnly = features.enabledOnly === true;
   const wantDiskCache = features.diskCache !== false;
 
   const auth = await resolveOmniRouteRuntimeAuth(
@@ -945,7 +948,11 @@ export async function forceSyncOmniRouteModels(args: {
       }
     }
     let rawEnrichment: OmniRouteEnrichmentMap = new Map();
-    if (wantEnrichment) {
+    // Enrichment is required by `usableOnly` and `enabledOnly` (the
+    // subtract-filter needs the known-alias set). We always fetch when
+    // either filter is on, even when the `enrichment` feature itself is
+    // off (which only gates the display-name overlay).
+    if (wantEnrichment || wantUsableOnly || wantEnabledOnly) {
       try {
         rawEnrichment = await enrichmentFetcher(auth.baseURL, auth.managementReadToken, 10_000);
       } catch {
@@ -965,7 +972,7 @@ export async function forceSyncOmniRouteModels(args: {
       }
     }
     let rawConnections: OmniRouteProviderConnection[] = [];
-    if (wantUsableOnly) {
+    if (wantUsableOnly || wantEnabledOnly) {
       try {
         rawConnections = await providersFetcher(auth.baseURL, auth.managementReadToken, 10_000);
       } catch {
@@ -996,6 +1003,12 @@ export async function forceSyncOmniRouteModels(args: {
     }
 
     const t = now();
+    // Derive enabled-provider alias set from the connections we just fetched.
+    // Soft-fail: empty connections OR feature off → undefined → filter disabled.
+    const enabledProviderSet =
+      wantEnabledOnly && rawConnections.length > 0
+        ? enabledProviderAliasSet(rawConnections, rawEnrichment)
+        : undefined;
     const entry = {
       rawModels,
       rawCombos,
@@ -1004,6 +1017,7 @@ export async function forceSyncOmniRouteModels(args: {
       rawCompressionCombos,
       rawConnections,
       activeModelIds: rawActiveIds,
+      enabledProviderSet,
       expiresAt: t + resolved.modelCacheTtl,
     };
     cache.set(cacheKey, entry);
@@ -3002,6 +3016,58 @@ export function usableProviderAliasSet(
 }
 
 /**
+ * Compute the set of provider aliases that have at least one ENABLED
+ * connection — `features.enabledOnly` filter factory. Mirrors
+ * `usableProviderAliasSet` EXCEPT for the `testStatus` gate: a connection
+ * qualifies as long as the operator's `isActive` toggle is on, regardless
+ * of connection-test health.
+ *
+ * Rationale: OmniRoute's dashboard exposes a per-connection `isActive`
+ * switch. Operators want the model picker to mirror THAT switch (a UI
+ * toggle, persisted across restarts) instead of being coupled to the
+ * transient `testStatus` field (which flips to `unavailable`/`expired` for
+ * rate-limited or temporarily-broken providers the operator still wants
+ * visible in the picker).
+ *
+ * Returned shape matches `usableProviderAliasSet` so the two filters are
+ * interchangeable at the verdict site.
+ */
+export function enabledProviderAliasSet(
+  connections: OmniRouteProviderConnection[],
+  enrichment: OmniRouteEnrichmentMap | undefined
+): {
+  aliases: Set<string>;
+  canonicals: Set<string>;
+  knownAliases: Set<string>;
+} {
+  const enabledCanonicals = new Set<string>();
+  for (const c of connections) {
+    if (!c || c.isActive !== true) continue;
+    // Intentionally NO testStatus check — that's the only difference vs
+    // usableProviderAliasSet. Active-but-failed-test providers stay in.
+    if (typeof c.provider === "string" && c.provider.length > 0) {
+      enabledCanonicals.add(c.provider);
+    }
+  }
+  const aliases = new Set<string>();
+  const knownAliases = new Set<string>();
+  if (enrichment) {
+    for (const entry of enrichment.values()) {
+      const alias = entry.providerAlias;
+      const canonical = entry.providerCanonical;
+      if (typeof alias !== "string" || alias.length === 0) continue;
+      knownAliases.add(alias);
+      if (typeof canonical !== "string" || canonical.length === 0) continue;
+      if (enabledCanonicals.has(canonical)) aliases.add(alias);
+    }
+  }
+  // Always include every enabled canonical as an alias too — handles the
+  // common case where `/v1/models` ids use the canonical id directly.
+  for (const canonical of enabledCanonicals) aliases.add(canonical);
+  return { aliases, canonicals: enabledCanonicals, knownAliases };
+}
+
+/**
  * Decide whether a raw `/v1/models` id passes the `usableOnly` filter.
  *
  * Rules (subtract-filter — bias toward keep):
@@ -3033,6 +3099,38 @@ export function isUsableRawModelId(
   // pass through (subtract-filter semantics).
   if (usable.knownAliases.has(prefix)) return false;
   return true;
+}
+
+/**
+ * Decide whether a raw `/v1/models` id passes the `enabledOnly` filter.
+ *
+ * Same subtract-filter semantics as `isUsableRawModelId`:
+ *   - id has no `/` → keep (combos/synthetic entries handled separately).
+ *   - prefix matches a known enabled alias OR canonical → keep.
+ *   - prefix is unknown to BOTH the connection table AND the enrichment
+ *     map → keep (we can't prove it's NOT enabled; could be agentrouter).
+ *   - prefix is known to the enrichment map BUT not in enabled set → drop.
+ *
+ * Pure function — exported so static + dynamic hooks share the same
+ * verdict logic without divergence. Pair with `enabledProviderAliasSet`,
+ * which is the analog of `usableProviderAliasSet` minus the testStatus gate.
+ */
+export function isEnabledRawModelId(
+  id: string,
+  enabled: {
+    aliases: Set<string>;
+    canonicals: Set<string>;
+    knownAliases: Set<string>;
+  },
+  enrichment: OmniRouteEnrichmentMap | undefined
+): boolean {
+  const slash = id.indexOf("/");
+  const prefix = slash <= 0 ? id : id.slice(0, slash);
+  if (enabled.aliases.has(prefix) || enabled.canonicals.has(prefix)) return true;
+  // Strict filter: unknown prefixes (including bare names without a "/") are
+  // DROPPED. This prevents hardcoded models from unconfigured providers
+ // (e.g. uppercase names like "EXPLORE", "KIRO AI") leaking through.
+  return false;
 }
 
 /**
@@ -3190,6 +3288,16 @@ export interface OmniRouteFetchCacheEntry {
   rawConnections: OmniRouteProviderConnection[];
   /** Dashboard-active model ids from /api/models (available=true). Optional: absent in old disk snapshots. */
   activeModelIds?: Set<string>;
+  /**
+   * Derived alias set for `features.enabledOnly` (providers whose
+   * `isActive: true` in /api/providers, ignoring `testStatus`). Optional:
+   * undefined when the feature is off or the connections fetch soft-failed.
+   */
+  enabledProviderSet?: {
+    aliases: Set<string>;
+    canonicals: Set<string>;
+    knownAliases: Set<string>;
+  };
   expiresAt: number;
 }
 
@@ -3277,6 +3385,7 @@ const diskSnapshotReader = deps.diskSnapshotReader ?? defaultDiskSnapshotReader;
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
   const wantActiveOnly = features.activeOnly === true;
+  const wantEnabledOnly = features.enabledOnly === true;
   const wantProviderTag = features.providerTag !== false;
   const now = deps.now ?? Date.now;
   // T-07: cache holds RAW fetch results (not pre-derived ModelV2) so that
@@ -3426,9 +3535,11 @@ let rawActiveIds: Set<string> = new Set();
       }
 
       // Enrichment fetch (nice names + pricing). Best-effort, gated by
-      // features.enrichment. Soft-fails to empty map.
+      // features.enrichment. Also always fetched when usableOnly OR
+      // enabledOnly is on — the subtract-filter needs the known-alias
+      // set to decide which prefixes to drop. Soft-fails to empty map.
       rawEnrichment = new Map();
-      if (wantEnrichment) {
+      if (wantEnrichment || wantUsableOnly || wantEnabledOnly) {
         try {
           rawEnrichment = await enrichmentFetcher(baseURL, managementReadToken, 10_000);
         } catch (err) {
@@ -3455,17 +3566,18 @@ let rawActiveIds: Set<string> = new Set();
       }
 
       // Provider-connections fetch. Off by default, gated by
-      // features.usableOnly. Soft-fails to empty array — when the
-      // connection table is unreadable we skip the filter entirely
-      // (subtract-filter semantics: don't drop everything we couldn't
-      // verify).
+      // features.usableOnly OR features.enabledOnly. Both filters share the
+      // same /api/providers payload — we fetch once when EITHER is on.
+      // Soft-fails to empty array — when the connection table is unreadable
+      // we skip the filter entirely (subtract-filter semantics: don't drop
+      // everything we couldn't verify).
       rawConnections = [];
-      if (wantUsableOnly) {
+      if (wantUsableOnly || wantEnabledOnly) {
         try {
           rawConnections = await providersFetcher(baseURL, managementReadToken, 10_000);
         } catch (err) {
           console.warn(
-            "[omniroute-plugin] /api/providers fetch failed; usableOnly filter disabled for this refresh",
+            "[omniroute-plugin] /api/providers fetch failed; usableOnly + enabledOnly filters disabled for this refresh",
             err
           );
         }
@@ -3505,6 +3617,14 @@ let rawActiveIds: Set<string> = new Set();
       }
       }
 
+      // Derive enabled-provider alias set (features.enabledOnly) from the
+      // connections we just fetched. Soft-fail: empty connections OR feature
+      // off → undefined → filter disabled for this refresh.
+      const enabledProviderSet =
+        wantEnabledOnly && rawConnections.length > 0
+          ? enabledProviderAliasSet(rawConnections, rawEnrichment)
+          : undefined;
+
       cache.set(cacheKey, {
         rawModels,
         rawCombos,
@@ -3513,6 +3633,7 @@ let rawActiveIds: Set<string> = new Set();
         rawCompressionCombos,
         rawConnections,
         activeModelIds: rawActiveIds,
+        enabledProviderSet,
         expiresAt: t + resolved.modelCacheTtl,
       });
 
@@ -3562,6 +3683,13 @@ let rawActiveIds: Set<string> = new Set();
         wantUsableOnly && rawConnections.length > 0
           ? usableProviderAliasSet(rawConnections, rawEnrichment)
           : undefined;
+      // enabledOnly — derived ONCE per refresh from the same connection
+      // payload. Same soft-fail contract as `usable`: empty connections OR
+      // feature off → undefined → filter disabled.
+      const enabled =
+        wantEnabledOnly && rawConnections.length > 0
+          ? enabledProviderAliasSet(rawConnections, rawEnrichment)
+          : undefined;
 
       // Build the canonical→alias reverse map AND the canonical-dedup
       // set once per refresh. Together they fix the dual-keyed
@@ -3582,6 +3710,7 @@ let rawActiveIds: Set<string> = new Set();
         if (!entry.id) continue;
         if (canonicalDedup.has(entry.id)) continue;
         if (usable && !isUsableRawModelId(entry.id, usable, rawEnrichment)) continue;
+        if (enabled && !isEnabledRawModelId(entry.id, enabled, rawEnrichment)) continue;
         if (wantActiveOnly && rawActiveIds.size > 0 && !rawActiveIds.has(entry.id)) continue;
         const model = mapRawModelToModelV2(entry, {
           // #6859: server-facing id — NOT the OC-gate-prefixed `resolved.providerId`.
@@ -4486,6 +4615,14 @@ export function buildStaticProviderEntry(
       ? usableProviderAliasSet(connections, enrichment)
       : undefined;
   const wantActiveOnly = opts.features?.activeOnly === true;
+  // enabledOnly — same fetch as usableOnly but NO testStatus check. Active
+  // providers whose tests are failing still surface their models. Soft-fail
+  // (empty connections) disables the filter rather than hiding the catalog.
+  const wantEnabledOnly = opts.features?.enabledOnly === true;
+  const enabled =
+    wantEnabledOnly && connections && connections.length > 0
+      ? enabledProviderAliasSet(connections, enrichment)
+      : undefined;
   // Provider-tag suffix — default-on, opt-out via `features.providerTag: false`.
   // Prepends e.g. `Claude - ` to enriched raw-model names so the picker
   // can tell `cc/claude-opus-4-7` (Anthropic) apart from `kr/claude-opus-4-7`
@@ -4523,6 +4660,7 @@ export function buildStaticProviderEntry(
     // Skip canonical-named twins when the alias-keyed enriched row exists.
     if (canonicalDedup.has(raw.id)) continue;
     if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
+    if (enabled && !isEnabledRawModelId(raw.id, enabled, enrichment)) continue;
     if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !matchesActiveId(raw.id, activeModelIds)) continue;
     // Note: matchesActiveId uses smart matching because OmniRoute's
     // /api/models returns IDs with extra sub-paths that don't match /v1/models.
@@ -4961,6 +5099,17 @@ interface OmniRouteDiskSnapshot {
         rawConnections: OmniRouteProviderConnection[];
         /** Dashboard-active model ids (features.activeOnly). Serialised as an array (Set is not JSON-friendly). */
         activeModelIds?: string[];
+        /**
+         * Enabled-provider alias set (features.enabledOnly). Serialised as
+         * arrays (Set is not JSON-friendly). Optional: absent when the
+         * feature is off, the connections fetch soft-failed, or the
+         * snapshot predates v0.2.19.
+         */
+        enabledProviderSet?: {
+          aliases: string[];
+          canonicals: string[];
+          knownAliases: string[];
+        };
         /** When the snapshot was written (epoch ms). */
   writtenAt: number;
 }
@@ -5040,6 +5189,13 @@ export const defaultDiskSnapshotWriter: OmniRouteDiskSnapshotWriter = async (
       rawCompressionCombos: entry.rawCompressionCombos,
       rawConnections: entry.rawConnections,
       activeModelIds: Array.from(entry.activeModelIds ?? []),
+      enabledProviderSet: entry.enabledProviderSet
+        ? {
+            aliases: Array.from(entry.enabledProviderSet.aliases),
+            canonicals: Array.from(entry.enabledProviderSet.canonicals),
+            knownAliases: Array.from(entry.enabledProviderSet.knownAliases),
+          }
+        : undefined,
       writtenAt: Date.now(),
     };
     await writeFile(file, JSON.stringify(snapshot), {
@@ -5080,6 +5236,25 @@ export const defaultDiskSnapshotReader: OmniRouteDiskSnapshotReader = async (
       activeModelIds: new Set(
         Array.isArray(parsed.activeModelIds) ? parsed.activeModelIds : []
       ),
+      enabledProviderSet: parsed.enabledProviderSet
+        ? {
+            aliases: new Set(
+              Array.isArray(parsed.enabledProviderSet.aliases)
+                ? parsed.enabledProviderSet.aliases
+                : []
+            ),
+            canonicals: new Set(
+              Array.isArray(parsed.enabledProviderSet.canonicals)
+                ? parsed.enabledProviderSet.canonicals
+                : []
+            ),
+            knownAliases: new Set(
+              Array.isArray(parsed.enabledProviderSet.knownAliases)
+                ? parsed.enabledProviderSet.knownAliases
+                : []
+            ),
+          }
+        : undefined,
     };
   } catch {
     return undefined;
@@ -5439,6 +5614,7 @@ export function createOmniRouteConfigHook(
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
   const wantActiveOnly = features.activeOnly === true;
+  const wantEnabledOnly = features.enabledOnly === true;
   const wantDiskCache = features.diskCache !== false;
   const wantProviderTag = features.providerTag !== false;
 
@@ -5624,9 +5800,11 @@ export function createOmniRouteConfigHook(
         // display names on raw model ids. On OC ≤ 1.15.5 the dynamic
         // `provider.models` hook never fires in `serve` mode, so the static
         // block IS what reaches `/provider` and the TUI model picker.
-        // Gated by `features.enrichment` (default-on). Soft-fail on error.
+        // Gated by `features.enrichment` (default-on). Also always
+        // fetched when usableOnly OR enabledOnly is on — the subtract-filter
+        // needs the known-alias set. Soft-fail on error.
         rawEnrichment = new Map();
-        if (wantEnrichment) {
+        if (wantEnrichment || wantUsableOnly || wantEnabledOnly) {
           try {
             rawEnrichment = await enrichmentFetcher(baseURL, managementReadToken, 10_000);
           } catch (err) {
@@ -5650,14 +5828,16 @@ export function createOmniRouteConfigHook(
           }
         }
 
-        // Provider-connections fetch — opt-in via features.usableOnly.
+        // Provider-connections fetch — opt-in via features.usableOnly OR
+        // features.enabledOnly. Both filters share the same /api/providers
+        // payload — we fetch once when EITHER is on.
         rawConnections = [];
-        if (wantUsableOnly) {
+        if (wantUsableOnly || wantEnabledOnly) {
           try {
             rawConnections = await providersFetcher(baseURL, managementReadToken, 10_000);
           } catch (err) {
             logger.warn(
-              "[omniroute-plugin] config shim: /api/providers fetch failed; usableOnly filter disabled for this refresh",
+              "[omniroute-plugin] config shim: /api/providers fetch failed; usableOnly + enabledOnly filters disabled for this refresh",
               err
             );
           }
@@ -5700,6 +5880,14 @@ export function createOmniRouteConfigHook(
 
       // Cache even partial results — a subsequent provider-hook call should
       // not re-burn the timeout window on the same broken endpoint.
+      // Derive enabled-provider alias set (features.enabledOnly) from the
+      // connections we just fetched. Soft-fail: empty connections OR feature
+      // off → undefined → filter disabled for this refresh.
+      const enabledProviderSet =
+        wantEnabledOnly && rawConnections.length > 0
+          ? enabledProviderAliasSet(rawConnections, rawEnrichment)
+          : undefined;
+
       cache.set(cacheKey, {
         rawModels,
         rawCombos,
@@ -5708,6 +5896,7 @@ export function createOmniRouteConfigHook(
         rawCompressionCombos,
         rawConnections,
         activeModelIds: rawActiveIds,
+        enabledProviderSet,
         expiresAt: t + resolved.modelCacheTtl,
       });
 
@@ -5742,6 +5931,7 @@ export function createOmniRouteConfigHook(
             rawCompressionCombos,
             rawConnections,
             activeModelIds: rawActiveIds,
+            enabledProviderSet,
           },
           snapshotFingerprint
         );
