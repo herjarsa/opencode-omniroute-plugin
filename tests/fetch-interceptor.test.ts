@@ -259,6 +259,83 @@ test("createOmniRouteFetchInterceptor: GET without body does NOT set Content-Typ
 });
 
 // ----------------------------------------------------------------------------
+// /v1/models response rewriter (OpenCode 1.18.18 `$.models` JSONPath)
+// ----------------------------------------------------------------------------
+
+test("createOmniRouteFetchInterceptor: /v1/models OpenAI-shape response exposes `models` alongside `data`", async () => {
+  const openAiBody = JSON.stringify({
+    object: "list",
+    data: [
+      { id: "kc/claude-opus-5-fast-low", object: "model" },
+      { id: "cc/claude-opus-4-7", object: "model" },
+    ],
+  });
+  const { restore } = installFetchRecorder(
+    new Response(openAiBody, { status: 200, headers: { "content-type": "application/json" } })
+  );
+  try {
+    const f = createOmniRouteFetchInterceptor({ apiKey: KEY, baseURL: BASE });
+    const res = await f(`${BASE}/models`, {});
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.models, body.data, "models must mirror data so $.models resolves");
+    assert.equal(body.object, "list", "original OpenAI shape preserved for non-OC clients");
+  } finally {
+    restore();
+  }
+});
+
+test("createOmniRouteFetchInterceptor: /v1/models response already carrying `models` is left untouched", async () => {
+  const original = {
+    models: [{ id: "x", object: "model" }],
+    data: [{ id: "different", object: "model" }],
+  };
+  const { restore } = installFetchRecorder(
+    new Response(JSON.stringify(original), { status: 200, headers: { "content-type": "application/json" } })
+  );
+  try {
+    const f = createOmniRouteFetchInterceptor({ apiKey: KEY, baseURL: BASE });
+    const res = await f(`${BASE}/models`, {});
+    const body = await res.json();
+    assert.deepEqual(body, original, "must not overwrite an existing models field");
+  } finally {
+    restore();
+  }
+});
+
+test("createOmniRouteFetchInterceptor: /v1/models non-OK response is NOT rewritten", async () => {
+  const originalBody = JSON.stringify({ error: "unauthorized" });
+  const { restore } = installFetchRecorder(
+    new Response(originalBody, { status: 401, headers: { "content-type": "application/json" } })
+  );
+  try {
+    const f = createOmniRouteFetchInterceptor({ apiKey: KEY, baseURL: BASE });
+    const res = await f(`${BASE}/models`, {});
+    assert.equal(res.status, 401, "non-OK status must be preserved");
+    const body = await res.json();
+    assert.equal(body.models, undefined, "no synthetic models on error response");
+  } finally {
+    restore();
+  }
+});
+
+test("createOmniRouteFetchInterceptor: non-/v1/models path is NOT rewritten even with OpenAI-shape body", async () => {
+  const originalBody = JSON.stringify({ object: "list", data: [{ id: "x" }] });
+  const { restore } = installFetchRecorder(
+    new Response(originalBody, { status: 200, headers: { "content-type": "application/json" } })
+  );
+  try {
+    const f = createOmniRouteFetchInterceptor({ apiKey: KEY, baseURL: BASE });
+    const res = await f(`${BASE}/chat/completions`, { method: "POST", body: "{}" });
+    const body = await res.json();
+    assert.equal(body.models, undefined, "rewriter must not touch other endpoints");
+    assert.deepEqual(body.data, [{ id: "x" }], "original body preserved");
+  } finally {
+    restore();
+  }
+});
+
+// ----------------------------------------------------------------------------
 // loader integration
 // ----------------------------------------------------------------------------
 

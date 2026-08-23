@@ -91,3 +91,57 @@ Combos and auto-combos have no enable/disable in the OmniRoute dashboard, so the
 - `tests/enabled-only.test.ts` (NEW): 10 tests (forceSync cache + soft-fail, snapshot round-trip, provider hook filtering, config hook filtering, catalog stability, enabledOnly+usableOnly intersection)
 - `package.json`: added `tests/enabled-only.test.ts` to `npm test`
 - `README.md`: features table row + example block + comparison with `usableOnly`
+
+---
+
+# PLAN — Fix: modelos OmniRoute obsoletos al iniciar OpenCode (+ reparación enabledOnly v0.2.22)
+
+**Repo**: herjarsa/opencode-omniroute-plugin · **Fecha**: 2026-08-23
+**Bug**: los modelos de OmniRoute no se actualizan al iniciar OpenCode.
+
+## Causa raíz (evidencia)
+
+- Ambos hooks son *snapshot-first* (`src/index.ts` provider hook ~3452-3479,
+  config hook ~5732-5757): con disk snapshot presente omiten todo fetch en vivo.
+- El one-shot startup sync que refrescaba catálogo+snapshot fue eliminado en
+  v0.2.14 (commit `787b26e`) por aborts de bun (`AbortError code 20`, ni inline
+  ni con `setImmediate`). Resultado: bucle de obsolescencia infinito; única
+  salida manual `/omni-sync`.
+- Extra: main tiene 6 tests rotos de `enabledOnly`; sesión anterior dejó refactor
+  a medias (ahora en el árbol). Decisión del usuario: neutralizar el filtro
+  (catálogo completo) y reparar todo en esta pasada.
+
+## Contrato de escenarios
+
+| ID | Escenario | Pass observable | Evidencia |
+|----|-----------|-----------------|-----------|
+| S1 | Startup sync programado | scheduler inyectado recibe fn + delay (default 2500ms); ok:true ejecuta 1 vez | RED→GREEN en `tests/startup-sync.test.ts` |
+| S2 | Retry acotado | ok:false → hasta maxAttempts(3) con retryDelayMs(10s); errores no rechazan | mismo archivo |
+| S3 | enabledOnly no-op | con `enabledOnly:true` el catálogo completo pasa (forceSync/provider/config) | tests T7-T9 alineados |
+| S4 | Superficie real | opencode + `omniroute serve` → log startup sync + snapshot fresco; daemon caído → retries sin crash | logs en `manual-qa/` |
+
+## Fases
+
+### Fase 1 — Alinear enabledOnly al contrato no-op (WIP usuario)
+1. Reescribir T7/T8/T9 en `tests/enabled-only.test.ts`: catálogo completo pasa;
+   renombrar tests; ajustar comentarios (verdict neutralizado v0.2.22).
+2. Verificación: `npm test` completo verde.
+3. Commit A: `fix(enabledOnly): neutralize filter to full-catalog behavior`.
+
+### Fase 2 — Startup sync diferido con retry (TDD)
+1. RED: tests nuevos en `tests/startup-sync.test.ts` (scheduler inyectable,
+   initialDelayMs=2500 default, maxAttempts=3, retryDelayMs=10000, no-reject).
+2. GREEN: extender `runOmniRouteStartupSync` (deps opcionales retrocompatibles)
+   y re-wire llamada en `OmniRoutePlugin` fuera de la ventana de abort de bun.
+3. Verificación: RED capturado → GREEN → `npm run build` exit 0 → lsp limpio.
+4. Commit B: `fix(startup): schedule deferred model sync with bounded retries`.
+
+### Fase 3 — QA superficie real (S4)
+- Build + deploy-local; opencode real contra `http://localhost:20128/v1`;
+  artefactos en `manual-qa/`.
+
+### Fase 4 — CI
+- Push de incrementos verificados → `gh run watch` → `conclusion=success`.
+- Pushes intermedios en RED evitados deliberadamente: cada push contiene un
+  incremento ya verde en local (suite+build), para no grabar corridas fallidas
+  permanentes en el historial de CI.
