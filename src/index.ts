@@ -1156,40 +1156,60 @@ export function createOmniRouteSyncModelsTool(args: {
 export function runOmniRouteStartupSync(args: {
   resolved: ResolvedOmniRoutePluginOptions;
   cache: OmniRouteFetchCache;
+  scheduler?: (fn: () => void, ms: number) => unknown;
+  initialDelayMs?: number;
+  retryDelayMs?: number;
+  maxAttempts?: number;
+  syncFn?: (args: { resolved: ResolvedOmniRoutePluginOptions; cache: OmniRouteFetchCache; onlyIfChanged: boolean }) => Promise<{ ok: boolean; unchanged?: boolean; preserved?: boolean; count?: number; error?: string; provider: string; baseURL: string; clearedMemory?: number; clearedDisk?: boolean }>;
 }): void {
   const { resolved, cache } = args;
-  void (async () => {
-    try {
-      const result = await forceSyncOmniRouteModels({
-        resolved,
-        cache,
-        onlyIfChanged: true,
-      });
-      if (result.unchanged) {
-        // Common case: no log. The cache + snapshot are already current.
-        return;
-      }
-      if (result.preserved) {
+  const scheduler = args.scheduler ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  const initialDelayMs = args.initialDelayMs ?? 2500;
+  const retryDelayMs = args.retryDelayMs ?? 10000;
+  const maxAttempts = args.maxAttempts ?? 3;
+  const syncFn = args.syncFn ?? forceSyncOmniRouteModels;
+  let attempt = 0;
+  const runAttempt = () => {
+    void (async () => {
+      attempt++;
+      try {
+        const result = await syncFn({
+          resolved,
+          cache,
+          onlyIfChanged: true,
+        });
+        if (result.unchanged) {
+          // Common case: no log. The cache + snapshot are already current.
+          return;
+        }
+        if (result.preserved) {
+          console.warn(
+            `[omniroute-plugin] startup sync preserved last-known-good catalog (providerId=${resolved.providerId})`,
+          );
+          return;
+        }
+        if (!result.ok) {
+          if (attempt < maxAttempts) {
+            scheduler(runAttempt, retryDelayMs);
+          } else {
+            console.warn(
+              `[omniroute-plugin] startup sync failed providerId=${resolved.providerId}: ${result.error}`,
+            );
+          }
+          return;
+        }
         console.warn(
-          `[omniroute-plugin] startup sync preserved last-known-good catalog (providerId=${resolved.providerId})`,
+          `[omniroute-plugin] startup sync picked up new models providerId=${resolved.providerId} count=${result.count}`,
         );
-        return;
+      } catch (err) {
+        console.warn("[omniroute-plugin] startup sync error", err);
+        if (attempt < maxAttempts) {
+          scheduler(runAttempt, retryDelayMs);
+        }
       }
-      if (!result.ok) {
-        console.warn(
-          `[omniroute-plugin] startup sync failed providerId=${resolved.providerId}: ${result.error}`,
-        );
-        return;
-      }
-      console.warn(
-        `[omniroute-plugin] startup sync picked up new models providerId=${resolved.providerId} count=${result.count}`,
-      );
-    } catch (err) {
-      // Defensive: forceSyncOmniRouteModels already returns {ok:false} on
-      // errors instead of throwing, so this is belt-and-suspenders.
-      console.warn("[omniroute-plugin] startup sync error", err);
-    }
-  })();
+    })();
+  };
+  scheduler(runAttempt, initialDelayMs);
 }
 
 export const OmniRoutePlugin: Plugin = async (_input, options) => {

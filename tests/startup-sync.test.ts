@@ -17,6 +17,15 @@ import assert from "node:assert/strict";
 import {
   resolveOmniRoutePluginOptions,
   forceSyncOmniRouteModels,
+  runOmniRouteStartupSync,
+  type OmniRouteFetchCache,
+  type OmniRouteRawModelEntry,
+  type OmniRouteDiskSnapshotReader,
+} from "../src/index.js";
+import assert from "node:assert/strict";
+import {
+  resolveOmniRoutePluginOptions,
+  forceSyncOmniRouteModels,
   type OmniRouteFetchCache,
   type OmniRouteRawModelEntry,
   type OmniRouteDiskSnapshotReader,
@@ -203,4 +212,97 @@ test("onlyIfChanged: rawModels.length===0 → falls through to last-known-good, 
   assert.equal(second.preserved, true);
   assert.equal(second.unchanged, undefined);
   assert.equal(second.count, 0);
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// runOmniRouteStartupSync scheduling contract (TDD RED for commit B)
+// ─────────────────────────────────────────────────────────────────────────
+
+test("runOmniRouteStartupSync: scheduler injected receives fn + default delay 2500 and executes once on ok:true", async () => {
+  const cache: OmniRouteFetchCache = new Map();
+  const resolved = resolvedNoDisk();
+  let scheduledDelay: number | undefined;
+  let scheduledFn: (() => void) | undefined;
+  const scheduler = (fn: () => void, ms: number) => {
+    scheduledFn = fn;
+    scheduledDelay = ms;
+  };
+  let callCount = 0;
+  const fakeSync = async () => {
+    callCount++;
+    return { ok: true as const, count: 1, combos: 0, clearedMemory: 0, clearedDisk: false, provider: resolved.providerId, baseURL: BASE_URL };
+  };
+  runOmniRouteStartupSync({ resolved, cache, scheduler, syncFn: fakeSync });
+  assert.equal(scheduledDelay, 2500, "default initialDelayMs should be 2500");
+  assert.ok(typeof scheduledFn === "function", "scheduler should receive a function");
+  // Execute the scheduled fn and verify it calls sync once.
+  await scheduledFn!();
+  // Allow microtasks to settle.
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 1, "sync should be called exactly once on ok:true");
+});
+
+test("runOmniRouteStartupSync: retries on ok:false up to maxAttempts with retryDelayMs", async () => {
+  const cache: OmniRouteFetchCache = new Map();
+  const resolved = resolvedNoDisk();
+  const delays: number[] = [];
+  const fns: Array<() => void> = [];
+  const scheduler = (fn: () => void, ms: number) => {
+    delays.push(ms);
+    fns.push(fn);
+  };
+  let callCount = 0;
+  const fakeSync = async () => {
+    callCount++;
+    return { ok: false as const, error: "boom", provider: resolved.providerId, baseURL: BASE_URL };
+  };
+  runOmniRouteStartupSync({ resolved, cache, scheduler, syncFn: fakeSync, initialDelayMs: 10, retryDelayMs: 50, maxAttempts: 3 });
+  assert.equal(delays[0], 10, "first delay should be initialDelayMs");
+  // First attempt failure should schedule a retry.
+  await fns[0]();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 1);
+  assert.equal(delays.length, 2, "should have scheduled first retry");
+  assert.equal(delays[1], 50, "retry delay should be retryDelayMs");
+  await fns[1]();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 2);
+  assert.equal(delays.length, 3, "should have scheduled second retry");
+  await fns[2]();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 3, "should have retried up to maxAttempts=3");
+  assert.equal(delays.length, 3, "no further retry after maxAttempts");
+});
+
+test("runOmniRouteStartupSync: thrown errors do not reject and trigger retry", async () => {
+  const cache: OmniRouteFetchCache = new Map();
+  const resolved = resolvedNoDisk();
+  const delays: number[] = [];
+  const fns: Array<() => void> = [];
+  const scheduler = (fn: () => void, ms: number) => {
+    delays.push(ms);
+    fns.push(fn);
+  };
+  let callCount = 0;
+  const fakeSync = async () => {
+    callCount++;
+    if (callCount < 3) throw new Error("transient");
+    return { ok: true as const, count: 1, combos: 0, clearedMemory: 0, clearedDisk: false, provider: resolved.providerId, baseURL: BASE_URL };
+  };
+  // Should not throw synchronously.
+  assert.doesNotThrow(() => {
+    runOmniRouteStartupSync({ resolved, cache, scheduler, syncFn: fakeSync, initialDelayMs: 5, retryDelayMs: 20, maxAttempts: 3 });
+  });
+  await fns[0]();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 1);
+  assert.equal(delays.length, 2, "throw should schedule retry");
+  await fns[1]();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 2);
+  assert.equal(delays.length, 3, "second throw should schedule retry");
+  await fns[2]();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(callCount, 3, "third attempt should succeed");
+  assert.equal(delays.length, 3, "no further retry after success");
 });
