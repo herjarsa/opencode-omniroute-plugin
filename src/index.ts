@@ -1213,89 +1213,68 @@ export function runOmniRouteStartupSync(args: {
 }
 
 export const OmniRoutePlugin: Plugin = async (_input, options) => {
-  const resolved = resolveOmniRoutePluginOptions(coercePluginOptions(options));
-  // T-07: a single per-plugin-instance cache shared between the provider
-  // hook (T-03/T-05) and the config-shim hook (T-07). On OC ≥1.14.49 both
-  // hooks fire within the same Plugin invocation, so a shared cache keeps
-  // /v1/models + /api/combos at exactly one round-trip per TTL refresh
-  // instead of two. On OC ≤1.14.48 only the config hook runs; the cache
-  // still works (single producer + single consumer through the same map).
-  // Each `OmniRoutePlugin(...)` invocation gets its OWN cache via closure,
-  // so prod + preprod side-by-side instances do NOT collide.
-  const sharedCache: OmniRouteFetchCache = new Map();
-  // Debug breadcrumb: confirm server() invocation + resolved options.
-  // Useful when diagnosing "is the plugin even running" from OC logs.
-  const _ver: string =
-    ((globalThis as Record<string, unknown>).__PLUGIN_VERSION__ as string) ?? "dev";
-  const _hash: string =
-    ((globalThis as Record<string, unknown>).__PLUGIN_GIT_HASH__ as string) ?? "unknown";
-  const _prefixes = resolved.features?.apiFormat?.anthropicPrefixes ?? DEFAULT_ANTHROPIC_PREFIXES;
-  _logger.always(
-    `v${_ver} (${_hash}) initialized` +
-      ` providerId=${resolved.providerId}` +
-      ` baseURL=${resolved.baseURL ?? "(from auth.json)"}` +
-      ` modelCacheTtl=${resolved.modelCacheTtl}ms` +
-      ` apiFormat=anthropic:[${_prefixes.join(",")}]` +
-      ` debugLog=${resolved.features?.debugLog ?? false}` +
-      ` logLevel=${resolved.features?.startupDebug ? "debug" : (resolved.features?.logLevel ?? "warn")}`
-  );
-
-  // Wire log level: startupDebug:true → "debug", explicit logLevel wins.
-  setLogLevel(resolved.features?.startupDebug ? "debug" : (resolved.features?.logLevel ?? "warn"));
-
-  // One-shot startup sync: fetches /v1/models once at plugin init and only
-  // updates cache + disk snapshot if the catalog has new models compared to
-  // the previous (cache or disk snapshot). Replaces the periodic
-  // setInterval auto-sync that caused unhandled AbortError crashes in
-  // bun's plugin runtime when the timer fired mid-shutdown. Background
-  // on-demand refresh is handled by `modelCacheTtl` on the provider hook.
-
-
-  const syncTool = createOmniRouteSyncModelsTool({ resolved, cache: sharedCache });
-  const bareProviderId = resolved.omnirouteProviderId;
-
-  // Config hook: keep existing catalog shim, and register slash command
-  // templates that ask the agent to call the force-sync tool (OpenCode has no
-  // Pi-style registerCommand API; tools + command templates are the native path).
-  const baseConfigHook = createOmniRouteConfigHook(resolved, { cache: sharedCache });
-  const configWithSyncCommand = async (input: Config) => {
-    await baseConfigHook(input);
-    const cfg = input as Config & {
-      command?: Record<
-        string,
-        { template: string; description?: string; agent?: string; model?: string; subtask?: boolean }
-      >;
+  try {
+    const resolved = resolveOmniRoutePluginOptions(coercePluginOptions(options));
+    const sharedCache: OmniRouteFetchCache = new Map();
+    const _ver: string = ((globalThis as Record<string, unknown>).__PLUGIN_VERSION__ as string) ?? "dev";
+    const _hash: string = ((globalThis as Record<string, unknown>).__PLUGIN_GIT_HASH__ as string) ?? "unknown";
+    const _prefixes = resolved.features?.apiFormat?.anthropicPrefixes ?? DEFAULT_ANTHROPIC_PREFIXES;
+    try {
+      _logger.always(
+        `v${_ver} (${_hash}) initialized` +
+          ` providerId=${resolved.providerId}` +
+          ` baseURL=${resolved.baseURL ?? "(from auth.json)"}` +
+          ` modelCacheTtl=${resolved.modelCacheTtl}ms` +
+          ` apiFormat=anthropic:[${_prefixes.join(",")}]` +
+          ` debugLog=${resolved.features?.debugLog ?? false}` +
+          ` logLevel=${resolved.features?.startupDebug ? "debug" : (resolved.features?.logLevel ?? "warn")}`
+      );
+    } catch { /* logger may be unavailable in minimal host */ }
+    try { setLogLevel(resolved.features?.startupDebug ? "debug" : (resolved.features?.logLevel ?? "warn")); } catch {}
+    try { runOmniRouteStartupSync({ resolved, cache: sharedCache }); } catch (e) {
+      try { console.warn("[omniroute-plugin] startup sync scheduling failed", e); } catch {}
+    }
+    const syncTool = createOmniRouteSyncModelsTool({ resolved, cache: sharedCache });
+    const bareProviderId = resolved.omnirouteProviderId;
+    const baseConfigHook = createOmniRouteConfigHook(resolved, { cache: sharedCache });
+    const configWithSyncCommand = async (input: Config) => {
+      try { await baseConfigHook(input); } catch (e) { try { console.warn("[omniroute-plugin] config hook failed", e); } catch {} }
+      try {
+        const cfg = input as Config & {
+          command?: Record<string, { template: string; description?: string; agent?: string; model?: string; subtask?: boolean }>;
+        };
+        if (!cfg.command) cfg.command = {};
+        if (!cfg.command["omni-sync"]) {
+          cfg.command["omni-sync"] = {
+            description: "Force-refresh OmniRoute model catalog (like Pi /omni sync)",
+            template:
+              `Force-refresh the OmniRoute model catalog now using the omniroute_sync_models tool ` +
+              `(provider ${bareProviderId}). After the tool returns, briefly report model count and whether the sync succeeded.`,
+          };
+        }
+        if (!cfg.command["omni-autosync"]) {
+          cfg.command["omni-autosync"] = {
+            description: "Show OmniRoute startup-sync / cache status",
+            template:
+              `Report OmniRoute discovery status for provider ${bareProviderId}: ` +
+              `modelCacheTtl=${resolved.modelCacheTtl}. The plugin runs a one-shot ` +
+              `startup sync that only refreshes cache + disk snapshot when /v1/models ` +
+              `has new models compared to the previous catalog (no periodic timer). ` +
+              `If the user asked to refresh now, call omniroute_sync_models.`,
+          };
+        }
+      } catch { /* never throw from config hook wrapper */ }
     };
-    if (!cfg.command) cfg.command = {};
-    if (!cfg.command["omni-sync"]) {
-      cfg.command["omni-sync"] = {
-        description: "Force-refresh OmniRoute model catalog (like Pi /omni sync)",
-        template:
-          `Force-refresh the OmniRoute model catalog now using the omniroute_sync_models tool ` +
-          `(provider ${bareProviderId}). After the tool returns, briefly report model count and whether the sync succeeded.`,
-      };
-    }
-    if (!cfg.command["omni-autosync"]) {
-      cfg.command["omni-autosync"] = {
-        description: "Show OmniRoute startup-sync / cache status",
-        template:
-          `Report OmniRoute discovery status for provider ${bareProviderId}: ` +
-          `modelCacheTtl=${resolved.modelCacheTtl}. The plugin runs a one-shot ` +
-          `startup sync that only refreshes cache + disk snapshot when /v1/models ` +
-          `has new models compared to the previous catalog (no periodic timer). ` +
-          `If the user asked to refresh now, call omniroute_sync_models.`,
-      };
-    }
-  };
-
-  return {
-    auth: createOmniRouteAuthHook(resolved),
-    provider: createOmniRouteProviderHook(resolved, { cache: sharedCache }),
-    config: configWithSyncCommand,
-    tool: {
-      omniroute_sync_models: syncTool,
-    },
-  };
+    return {
+      auth: createOmniRouteAuthHook(resolved),
+      provider: createOmniRouteProviderHook(resolved, { cache: sharedCache }),
+      config: configWithSyncCommand,
+      tool: { omniroute_sync_models: syncTool },
+    };
+  } catch (e) {
+    try { console.warn("[omniroute-plugin] plugin init failed, returning no-op hooks", e); } catch {}
+    return {};
+  }
 };
 
 /**

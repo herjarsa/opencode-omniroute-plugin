@@ -121,13 +121,13 @@ test("multi-instance: loader closures see their own opts (not last-write-wins)",
 });
 
 test("multi-instance: invalid opts on one instance does not poison the other", async () => {
-  // Sequencing: bad opts → good opts. The bad call must throw cleanly; the
-  // good call must still produce a working hooks object. Confirms no
-  // half-built module-level state survives a failed parse.
-  await assert.rejects(
-    () => OmniRoutePlugin(fakeInput, { providerId: "bad id!" } as never),
-    /providerId/
-  );
+  // v0.2.24+: invalid opts no longer throw — plugin returns no-op hooks instead,
+  // preventing openchamber/opencode host crashes. The bad instance is inert,
+  // and subsequent instances still work.
+  const bad = await OmniRoutePlugin(fakeInput, { providerId: "bad id!" } as never);
+  assert.ok(bad, "bad instance returns a value (no-op)");
+  assert.equal(bad.auth, undefined, "bad instance has no auth hook");
+  assert.equal(bad.provider, undefined, "bad instance has no provider hook");
   const ok = await OmniRoutePlugin(fakeInput, {
     providerId: "recovered",
     baseURL: "https://ok.example/v1",
