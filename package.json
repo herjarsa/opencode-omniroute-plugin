@@ -42,7 +42,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/herjarsa/opencode-omniroute-plugin.git"
+    "url": "git+https://github.com/herjarsa/opencode-omniroute-plugin.git"
   },
   "bugs": {
     "url": "https://github.com/diegosouzapw/OmniRoute/issues"
@@ -61,7 +61,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@colbymchenry/codegraph": "^1.5.0",
+    "@colbymchenry/codegraph": "^1.6.0",
     "@opencode-ai/plugin": "^1.15.6",
     "@types/node": "^22.19.19",
     "tsup": "^8.5.1",

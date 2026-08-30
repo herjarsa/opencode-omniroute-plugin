@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +20,8 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           cache: npm
 
+      - run: npm install -g npm@^11.5
+
       - run: npm ci
 
       - run: npm run build
@@ -27,8 +30,7 @@ jobs:
 
       - name: Publish to npm
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
