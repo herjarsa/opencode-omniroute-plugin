@@ -1,6 +1,6 @@
 {
   "name": "opencode-omniroute-plugin",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "description": "OpenCode plugin for the OmniRoute AI Gateway. Drives dynamic model discovery, /connect auth flow, and multi-instance OmniRoute providers via the official @opencode-ai/plugin contract.",
   "type": "module",
   "main": "./dist/index.js",
