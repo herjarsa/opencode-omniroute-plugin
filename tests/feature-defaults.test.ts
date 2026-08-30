@@ -30,6 +30,8 @@ const DEFAULT_ON = [
   "providerTag",
   "fetchInterceptor",
   "geminiSanitization",
+  "enabledOnly",
+  "activeOnly",
 ] as const;
 
 const DEFAULT_OFF = [

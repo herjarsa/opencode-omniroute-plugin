@@ -162,22 +162,22 @@ test("forceSync: enabledOnly=true stores enabledProviderSet in the cache entry",
   const entry = [...cache.values()][0];
   assert.ok(entry, "cache entry written");
   assert.ok(entry.enabledProviderSet, "entry carries an enabled-provider set");
-  // All three active providers must be in the set, regardless of testStatus
+// All three active providers must be in the set, regardless of testStatus
   assert.ok(
-    entry.enabledProviderSet!.has("kilocode"),
+    entry.enabledProviderSet!.prefixes.has("kilocode"),
     "active kc provider included",
   );
   assert.ok(
-    entry.enabledProviderSet!.has("kiro"),
+    entry.enabledProviderSet!.prefixes.has("kiro"),
     "active kr provider included",
   );
   assert.ok(
-    entry.enabledProviderSet!.has("minimax"),
+    entry.enabledProviderSet!.prefixes.has("minimax"),
     "active-but-failed-test m3 provider included (testStatus ignored)",
   );
   // Disabled provider must NOT be in the set
   assert.equal(
-    entry.enabledProviderSet!.has("openrouter"),
+    entry.enabledProviderSet!.prefixes.has("openrouter"),
     false,
     "disabled openrouter excluded",
   );
@@ -196,15 +196,14 @@ test("forceSync: provider with isActive=true but failed testStatus is included",
     providersFetcher: providersFetcherAll,
     activeModelsFetcher: async () => new Set([MODEL_KC.id, MODEL_KR.id, MODEL_M3.id]),
   });
-
-  const entry = [...cache.values()][0];
+const entry = [...cache.values()][0];
   assert.ok(entry?.enabledProviderSet, "enabledProviderSet present");
   // minimax testStatus is "expired" but isActive is true — must be kept
   assert.ok(
-    entry!.enabledProviderSet!.has("minimax"),
+    entry!.enabledProviderSet!.prefixes.has("minimax"),
     "active+failed-test provider kept by enabledOnly",
   );
-});
+  });
 
 // ─────────────────────────────────────────────────────────────────────────
 // T3. Soft-fail: empty connections → filter disabled, all models pass
@@ -272,7 +271,7 @@ test("snapshot: enabledProviderSet survives writer → reader round-trip", async
         rawCompressionCombos: [],
         rawConnections: [],
         activeModelIds: new Set(),
-        enabledProviderSet: new Set(["kilocode", "kiro", "minimax"]),
+        enabledProviderSet: { prefixes: new Set(["kilocode", "kiro", "minimax"]), knownAliases: new Set(["kilocode", "kiro", "minimax"]) },
       },
       fp
     );
@@ -280,15 +279,15 @@ test("snapshot: enabledProviderSet survives writer → reader round-trip", async
     assert.ok(read, "snapshot readable");
     assert.ok(read?.enabledProviderSet, "enabledProviderSet restored from disk");
     assert.ok(
-      read!.enabledProviderSet!.has("kilocode"),
+      read!.enabledProviderSet!.prefixes.has("kilocode"),
       "kilocode survives round-trip",
     );
     assert.ok(
-      read!.enabledProviderSet!.has("minimax"),
+      read!.enabledProviderSet!.prefixes.has("minimax"),
       "minimax survives round-trip",
     );
     assert.ok(
-      !read!.enabledProviderSet!.has("openrouter"),
+      !read!.enabledProviderSet!.prefixes.has("openrouter"),
       "openrouter not in enabled set",
     );
   } finally {
@@ -339,9 +338,9 @@ test("provider hook: enabledOnly=true drops models of disabled providers", async
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// T7. Provider hook: enabledOnly neutralized — disabled-provider models stay
+// T7. Provider hook: enabledOnly drops models of disabled providers
 // ─────────────────────────────────────────────────────────────────────────
-test("provider hook: enabledOnly=true keeps full catalog (filter neutralized v0.2.22)", async () => {
+test("provider hook: enabledOnly=true drops models of disabled providers", async () => {
   const MODEL_OR: OmniRouteRawModelEntry = {
     id: "openrouter/free-llama",
     object: "model",
@@ -374,17 +373,17 @@ test("provider hook: enabledOnly=true keeps full catalog (filter neutralized v0.
   const ctx = { auth: { type: "api", key: API_KEY } };
 
   const out = await hook.models(provider as never, ctx as never);
-  assert.ok(out["kc/claude-opus-4-7"], "kc/ model kept");
-  assert.ok(
+  assert.ok(out["kc/claude-opus-4-7"], "kc/ model kept (active provider)");
+  assert.equal(
     out["openrouter/free-llama"],
-    "openrouter/ model kept (verdict neutralized v0.2.22)",
+    undefined,
+    "openrouter/ model dropped (disabled provider)",
   );
 });
 
+// T8. Config hook: static block drops disabled-provider models with enabledOnly
 // ─────────────────────────────────────────────────────────────────────────
-// T8. Config hook: static block publishes full catalog with enabledOnly
-// ─────────────────────────────────────────────────────────────────────────
-test("config hook: enabledOnly=true publishes full static block (filter neutralized v0.2.22)", async () => {
+test("config hook: enabledOnly=true drops disabled-provider models from static block", async () => {
   const MODEL_OR: OmniRouteRawModelEntry = {
     id: "openrouter/free-llama",
     object: "model",
@@ -422,9 +421,10 @@ test("config hook: enabledOnly=true publishes full static block (filter neutrali
     ] as { models: Record<string, unknown> };
     assert.ok(entry, "static block published");
     assert.ok(entry.models["kc/claude-opus-4-7"], "active-provider model present");
-    assert.ok(
+    assert.equal(
       entry.models["openrouter/free-llama"],
-      "disabled-provider model present (verdict neutralized v0.2.22)",
+      undefined,
+      "disabled-provider model dropped from static block",
     );
   } finally {
     if (previousDataDir === undefined) delete process.env.OPENCODE_DATA_DIR;
@@ -434,9 +434,9 @@ test("config hook: enabledOnly=true publishes full static block (filter neutrali
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// T9. Catalog stable after forceSync: full catalog persists (no flip)
+// T9. Catalog stable after forceSync: filtered catalog persists (no flip)
 // ─────────────────────────────────────────────────────────────────────────
-test("provider hook: catalog stays full after forceSync with enabledOnly", async () => {
+test("provider hook: catalog stays filtered after forceSync with enabledOnly", async () => {
   const MODEL_OR: OmniRouteRawModelEntry = {
     id: "openrouter/free-llama",
     object: "model",
@@ -471,12 +471,13 @@ test("provider hook: catalog stays full after forceSync with enabledOnly", async
   const provider = { options: { baseURL: BASE_URL } };
   const ctx = { auth: { type: "api", key: API_KEY } };
 
-  // 1. Cold call: cache miss → full refetch → full catalog (verdict neutralized).
+  // 1. Cold call: cache miss → full refetch → disabled-provider models dropped.
   const first = await hook.models(provider as never, ctx as never);
   assert.ok(first["kc/claude-opus-4-7"], "active model present on cold start");
-  assert.ok(
+  assert.equal(
     first["openrouter/free-llama"],
-    "disabled model present on cold start (verdict neutralized)",
+    undefined,
+    "disabled-provider model dropped on cold start",
   );
 
   // 2. forceSync refreshes the shared cache.
@@ -490,21 +491,22 @@ test("provider hook: catalog stays full after forceSync with enabledOnly", async
   });
   assert.equal(sync.ok, true);
 
-  // 3. Cache hit after forceSync must still serve the FULL catalog — it must
-  //    NOT flip back to a filtered list.
+  // 3. Cache hit after forceSync must STILL drop the disabled-provider model —
+  //    the catalog must NOT flip back to a full list.
   clock = 1_000 + 10_000; // inside TTL → cache hit
   const after = await hook.models(provider as never, ctx as never);
   assert.ok(after["kc/claude-opus-4-7"], "active model still present after forceSync");
-  assert.ok(
+  assert.equal(
     after["openrouter/free-llama"],
-    "full catalog persists after forceSync (no flip)",
+    undefined,
+    "filtered catalog persists after forceSync (no flip back to full)",
   );
 });
 
 // ─────────────────────────────────────────────────────────────────────────
 // T10. enabledOnly + usableOnly can coexist (intersection applies)
 // ─────────────────────────────────────────────────────────────────────────
-test("provider hook: usableOnly still filters when paired with neutralized enabledOnly", async () => {
+test("provider hook: enabledOnly and usableOnly both filter on top of each other", async () => {
   // kilocode is active + healthy → passes both filters
   // kiro is active but testStatus=failed → passes enabledOnly, fails usableOnly
   // minimax is active + healthy → passes both filters
@@ -541,8 +543,10 @@ test("provider hook: usableOnly still filters when paired with neutralized enabl
   const ctx = { auth: { type: "api", key: API_KEY } };
 
   const out = await hook.models(provider as never, ctx as never);
-  // enabledOnly is neutralized since v0.2.22, so usableOnly alone does the
-  // dropping here: KR (active but failed testStatus) is removed.
+  // Both filters are active. usableOnly is stricter (requires active AND
+  // healthy testStatus), so the intersection drops KR (active but failed test).
+  // openrouter is disabled — enabledOnly would drop it; usableOnly also drops
+  // it because it is not in the connections table at all.
   assert.ok(out["kc/claude-opus-4-7"], "kc kept (active + healthy)");
   assert.equal(
     out["kr/gpt-5"],

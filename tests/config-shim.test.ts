@@ -989,7 +989,7 @@ test("config: features.enrichment=false skips enrichment fetch + keeps raw-id na
   const logger = captureWarn();
 
   const hook = createOmniRouteConfigHook(
-    { providerId: "omniroute", features: { enrichment: false } },
+    { providerId: "omniroute", features: { enrichment: false, enabledOnly: false, activeOnly: false } },
     { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, logger }
   );
   const input = makeInput();
@@ -1087,7 +1087,7 @@ test("config: usableOnly=false → no filter (existing behavior)", async () => {
   );
 
   const hook = createOmniRouteConfigHook(
-    { providerId: "omniroute", baseURL: "https://or.example/v1" },
+    { providerId: "omniroute", baseURL: "https://or.example/v1", features: { enabledOnly: false, activeOnly: false } },
     { diskSnapshotReader: noopDiskSnapshotReader, readAuthJson, fetcher, combosFetcher, enrichmentFetcher, providersFetcher }
   );
 
@@ -1519,5 +1519,5 @@ test("buildStaticProviderEntry: nested combo-ref context is the bottleneck acros
   // Post-fix: Parent should advertise 8_000 (TinyCombo bottleneck).
   const parent = block.models["parent"];
   assert.ok(parent, "Parent combo must be in the static catalog");
-  assert.equal(parent.limit?.context, 8_000);
+assert.equal(parent.limit?.context, 8_000);
 });

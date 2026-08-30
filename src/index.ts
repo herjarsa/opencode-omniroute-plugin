@@ -243,11 +243,11 @@ export const OMNIROUTE_FEATURE_DEFAULTS = {
   providerTag: true,
   fetchInterceptor: true,
   geminiSanitization: true,
+  enabledOnly: true,
+  activeOnly: true,
   // default-OFF (read sites use `features.X === true`)
   compressionMetadata: false,
   usableOnly: false,
-  activeOnly: false,
-  enabledOnly: false,
   mcpAutoEmit: false,
   debugLog: false,
   startupDebug: false,
@@ -811,8 +811,8 @@ export async function forceSyncOmniRouteModels(args: {
   const wantEnrichment = features.enrichment !== false;
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
-  const wantActiveOnly = features.activeOnly === true;
-  const wantEnabledOnly = features.enabledOnly === true;
+  const wantActiveOnly = features.activeOnly !== false;
+  const wantEnabledOnly = features.enabledOnly !== false;
   const wantDiskCache = features.diskCache !== false;
 
   const auth = await resolveOmniRouteRuntimeAuth(
@@ -3034,9 +3034,24 @@ export function usableProviderAliasSet(
 }
 
 /**
+ * Shape returned by `enabledProviderPrefixes`. The verdict site uses
+ * `prefixes` for the keep check and `knownAliases` to distinguish
+ * "unknown synthetic prefix" (e.g. `agentrouter/*`) — which passes
+ * through — from "known prefix that is not enabled" — which is dropped.
+ */
+export interface EnabledProviderSet {
+  /** Canonical + alias prefixes whose connection has `isActive: true`. */
+  prefixes: Set<string>;
+  /** Every alias seen in `enrichment`, regardless of usability — used to
+   *  identify "known but not enabled" prefixes for subtract-filter. */
+  knownAliases: Set<string>;
+}
+
+/**
  * Build the set of provider prefixes (canonicals + their aliases) that are
- * currently `isActive: true` in OmniRoute's /api/providers. Returned as a flat
- * Set<string> so the filter verdict is a single membership check.
+ * currently `isActive: true` in OmniRoute's /api/providers. Returned as a
+ * flat `EnabledProviderSet` so the filter verdict can do a single membership
+ * check while still distinguishing "unknown prefix" from "known-but-disabled".
  *
  * If `enrichment` is provided, we also add each alias whose canonical is in
  * the enabled set, so models like `kc/claude-opus-4-7` are kept when the
@@ -3045,25 +3060,29 @@ export function usableProviderAliasSet(
 export function enabledProviderPrefixes(
   connections: OmniRouteProviderConnection[],
   enrichment?: OmniRouteEnrichmentMap
-): Set<string> {
-  const enabled = new Set<string>();
+): EnabledProviderSet {
+  const prefixes = new Set<string>();
   for (const c of connections) {
     if (c?.isActive === true && typeof c.provider === "string" && c.provider.length > 0) {
-      enabled.add(c.provider);
+      prefixes.add(c.provider);
     }
   }
+  const knownAliases = new Set<string>();
   if (enrichment) {
     for (const entry of enrichment.values()) {
       if (
         entry?.providerAlias &&
         entry?.providerCanonical &&
-        enabled.has(entry.providerCanonical)
+        prefixes.has(entry.providerCanonical)
       ) {
-        enabled.add(entry.providerAlias);
+        prefixes.add(entry.providerAlias);
+      }
+      if (typeof entry?.providerAlias === "string" && entry.providerAlias.length > 0) {
+        knownAliases.add(entry.providerAlias);
       }
     }
   }
-  return enabled;
+  return { prefixes, knownAliases };
 }
 
 /**
@@ -3102,12 +3121,21 @@ export function isUsableRawModelId(
 
 /**
  * enabledOnly verdict: keep a /v1/models id if its provider prefix is in the
- * enabled set. id with no `/` (combos, synthetic) passes through.
+ * enabled set. Subtract-filter semantics mirror `isUsableRawModelId`:
+ *   - id has no `/` → keep (combos, synthetic entries handled elsewhere).
+ *   - prefix matches an enabled canonical or alias → keep.
+ *   - prefix is known to enrichment BUT not in the enabled set → drop.
+ *   - prefix is unknown to BOTH enabled and known-aliases (e.g.
+ *     `agentrouter/*` synthetic entries) → keep (subtract-filter
+ *     biases toward keeping catalog contents the operator has not
+ *     explicitly disabled).
  */
-export function isEnabledRawModelId(_id: string, _enabled: Set<string>): boolean {
-  // v0.2.22 STAGING: enabledOnly is a no-op so the picker shows the full
-  // catalog without applying the per-provider filter. This restores the
-  // behavior the user confirmed working before the filter attempt.
+export function isEnabledRawModelId(id: string, enabled: EnabledProviderSet): boolean {
+  const slash = id.indexOf("/");
+  if (slash <= 0) return true;
+  const prefix = id.slice(0, slash);
+  if (enabled.prefixes.has(prefix)) return true;
+  if (enabled.knownAliases.has(prefix)) return false;
   return true;
 }
 
@@ -3273,7 +3301,7 @@ export interface OmniRouteFetchCacheEntry {
    * when the feature is off, the connection fetch failed, or the snapshot
    * predates v0.2.22.
    */
-  enabledProviderSet?: Set<string>;
+  enabledProviderSet?: EnabledProviderSet;
   expiresAt: number;
 }
 
@@ -3360,8 +3388,8 @@ const diskSnapshotReader = deps.diskSnapshotReader ?? defaultDiskSnapshotReader;
   const wantEnrichment = features.enrichment !== false;
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
-  const wantActiveOnly = features.activeOnly === true;
-  const wantEnabledOnly = features.enabledOnly === true;
+  const wantActiveOnly = features.activeOnly !== false;
+  const wantEnabledOnly = features.enabledOnly !== false;
   const wantProviderTag = features.providerTag !== false;
   const now = deps.now ?? Date.now;
   // T-07: cache holds RAW fetch results (not pre-derived ModelV2) so that
@@ -3436,7 +3464,7 @@ const diskSnapshotReader = deps.diskSnapshotReader ?? defaultDiskSnapshotReader;
       // it on BOTH cache hit and cache miss paths. Stays undefined when the
       // feature is off, the connection fetch soft-failed, or the snapshot
       // predates v0.2.22.
-      let enabledProviderSet: Set<string> | undefined;
+      let enabledProviderSet: EnabledProviderSet | undefined;
       if (cached && cached.expiresAt > t) {
         rawModels = cached.rawModels;
         rawCombos = cached.rawCombos;
@@ -4637,12 +4665,12 @@ export function buildStaticProviderEntry(
     wantUsableOnly && connections && connections.length > 0
       ? usableProviderAliasSet(connections, enrichment)
       : undefined;
-  const wantActiveOnly = opts.features?.activeOnly === true;
+  const wantActiveOnly = opts.features?.activeOnly !== false;
   // enabledOnly — same fetch as usableOnly but NO testStatus check. Active
   // providers whose tests are failing still surface their models. The shape
   // mirrors `usableProviderAliasSet` so the verdict site is interchangeable.
   // Soft-fail (empty connections) disables the filter rather than hiding the catalog.
-  const wantEnabledOnly = opts.features?.enabledOnly === true;
+  const wantEnabledOnly = opts.features?.enabledOnly !== false;
   const enabled =
     wantEnabledOnly && connections && connections.length > 0
       ? enabledProviderPrefixes(connections, enrichment)
@@ -5123,14 +5151,17 @@ interface OmniRouteDiskSnapshot {
         rawConnections: OmniRouteProviderConnection[];
         /** Dashboard-active model ids (features.activeOnly). Serialised as an array (Set is not JSON-friendly). */
         activeModelIds?: string[];
-  /**
+/**
    * Enabled-provider verdict set (features.enabledOnly). Only providers with
    * `isActive: true` are included (testStatus ignored — the differentiator vs
-   * usableOnly). Each Set is serialised as an array (Set is not JSON-friendly).
-   * Optional: absent when the feature is off, the connections fetch soft-failed,
-   * or the snapshot predates v0.2.22.
+   * usableOnly). Carries BOTH the active prefixes AND the full alias universe
+   * so the verdict can do subtract-filter semantics (unknown synthetic
+   * prefixes like `agentrouter/*` pass through). Each inner Set is serialised
+   * as an array (Set is not JSON-friendly). Optional: absent when the feature
+   * is off, the connections fetch soft-failed, or the snapshot predates
+   * the re-enabled filter.
    */
-  enabledProviderSet?: string[];
+  enabledProviderSet?: { prefixes: string[]; knownAliases: string[] };
 
         /** Plugin version that wrote the snapshot. Invalidate old snapshots on version bump. */
         pluginVersion: string;
@@ -5212,8 +5243,11 @@ export const defaultDiskSnapshotWriter: OmniRouteDiskSnapshotWriter = async (
       rawCompressionCombos: entry.rawCompressionCombos,
       rawConnections: entry.rawConnections,
       activeModelIds: Array.from(entry.activeModelIds ?? []),
-      enabledProviderSet: entry.enabledProviderSet
-        ? Array.from(entry.enabledProviderSet)
+enabledProviderSet: entry.enabledProviderSet
+        ? {
+            prefixes: Array.from(entry.enabledProviderSet.prefixes),
+            knownAliases: Array.from(entry.enabledProviderSet.knownAliases),
+          }
         : undefined,
       pluginVersion: PLUGIN_VERSION,
 writtenAt: Date.now(),
@@ -5258,13 +5292,16 @@ typeof parsed.identityFingerprint !== "string" ||
       activeModelIds: new Set(
         Array.isArray(parsed.activeModelIds) ? parsed.activeModelIds : []
       ),
-      enabledProviderSet: parsed.enabledProviderSet
-        ? new Set(
-            Array.isArray(parsed.enabledProviderSet)
-              ? parsed.enabledProviderSet
-              : []
-          )
-        : undefined,
+      enabledProviderSet:
+        parsed.enabledProviderSet &&
+        typeof parsed.enabledProviderSet === "object" &&
+        Array.isArray(parsed.enabledProviderSet.prefixes) &&
+        Array.isArray(parsed.enabledProviderSet.knownAliases)
+          ? {
+              prefixes: new Set(parsed.enabledProviderSet.prefixes),
+              knownAliases: new Set(parsed.enabledProviderSet.knownAliases),
+            }
+          : undefined,
     };
   } catch {
     return undefined;
@@ -5623,8 +5660,8 @@ export function createOmniRouteConfigHook(
   const wantEnrichment = features.enrichment !== false;
   const wantCompressionMeta = features.compressionMetadata === true;
   const wantUsableOnly = features.usableOnly === true;
-  const wantActiveOnly = features.activeOnly === true;
-  const wantEnabledOnly = features.enabledOnly === true;
+  const wantActiveOnly = features.activeOnly !== false;
+  const wantEnabledOnly = features.enabledOnly !== false;
   const wantDiskCache = features.diskCache !== false;
   const wantProviderTag = features.providerTag !== false;
 

@@ -389,7 +389,7 @@ test("provider hook: enrichment fetcher NOT called when features.enrichment:fals
     {
       providerId: "omniroute",
       baseURL: "https://or.example.com/v1",
-      features: { enrichment: false },
+      features: { enrichment: false, enabledOnly: false, activeOnly: false },
     },
     {
       fetcher: async () => SAMPLE_RAW,
