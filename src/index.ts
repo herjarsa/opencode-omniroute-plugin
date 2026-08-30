@@ -3140,7 +3140,21 @@ export function isEnabledRawModelId(id: string, enabled: EnabledProviderSet): bo
 }
 
 /**
- * Build the set of provider prefixes that participate in a published combo,
+ * Validate that a candidate provider prefix is well-formed before it can
+ * carve out a filter bypass. Rejects empty strings, uppercase letters,
+ * whitespace, slashes, and overlong strings. Match the upstream OmniRoute
+ * conventions: lowercase ASCII letters, digits, and hyphens; 1–50 chars;
+ * first char must be alphanumeric (no leading hyphen, which would let a
+ * typo `-foo` sneak past). This is a defense-in-depth check — typos in
+ * `combo.models[].model` or `candidatePool[]` would otherwise widen the
+ * filter bypass to garbage prefixes.
+ */
+const PROVIDER_PREFIX_PATTERN = /^[a-z0-9][a-z0-9-]{0,49}$/;
+
+export function isValidProviderPrefix(s: string): boolean {
+  return PROVIDER_PREFIX_PATTERN.test(s);
+}
+
 /**
  * Build the set of provider prefixes that participate in a published combo,
  * either as a DB-combo member ref (`combo.models[].model`) or as an
@@ -3152,6 +3166,15 @@ export function isEnabledRawModelId(id: string, enabled: EnabledProviderSet): bo
  * catalog, so a combo member that was filtered out would surface as
  * `ProviderModelNotFoundError: Model not found: … Did you mean:
  * auto/<x>?` even though the combo itself is published and routable.
+ *
+ * Security gate (audit 2026-08-30): the filter site only applies the
+ * carve-out for prefixes that ALSO appear in the operator's `enabled.prefixes`
+ * (when `enabledOnly` is active). This prevents a combo declaration authored
+ * by an upstream admin from re-surfacing providers the operator has
+ * explicitly disabled in their gateway. When `enabled` is undefined
+ * (soft-fail / connections empty), the carve-out still applies for any
+ * valid prefix — preserves backwards compatibility with operators who
+ * don't run with `enabledOnly`.
  *
  * Carve-out applies to the prefix only — the model itself still has to
  * exist in the raw catalog and pass all non-prefix filters (caps,
@@ -3170,7 +3193,9 @@ export function buildComboMemberPrefixes(
       if (step?.kind !== "model") continue;
       if (typeof step.model !== "string" || step.model.length === 0) continue;
       const slash = step.model.indexOf("/");
-      if (slash > 0) prefixes.add(step.model.slice(0, slash));
+      if (slash <= 0) continue;
+      const prefix = step.model.slice(0, slash);
+      if (isValidProviderPrefix(prefix)) prefixes.add(prefix);
     }
   }
   for (const autoCombo of rawAutoCombos ?? []) {
@@ -3178,7 +3203,7 @@ export function buildComboMemberPrefixes(
     const pool = Array.isArray(autoCombo.candidatePool) ? autoCombo.candidatePool : [];
     for (const prefix of pool) {
       if (typeof prefix === "string" && prefix.length > 0) {
-        prefixes.add(prefix);
+        if (isValidProviderPrefix(prefix)) prefixes.add(prefix);
       }
     }
   }
@@ -3769,18 +3794,28 @@ const aliasIndex = buildAliasIndex(rawEnrichment);
       const models: Record<string, ModelV2> = {};
       for (const entry of rawModels) {
         if (!entry.id) continue;
-if (canonicalDedup.has(entry.id)) continue;
-      // Combo-member carve-out: a model whose provider prefix participates in
-      // a published combo is exempt from usableOnly/enabledOnly/activeOnly so
-      // the combo's runtime expansion can find its concrete members.
-      const slash = entry.id.indexOf("/");
-      const entryPrefix = slash > 0 ? entry.id.slice(0, slash) : "";
-      const isComboMember = entryPrefix.length > 0 && comboMemberPrefixes.has(entryPrefix);
-      if (!isComboMember) {
-        if (usable && !isUsableRawModelId(entry.id, usable, rawEnrichment)) continue;
-        if (enabled && !isEnabledRawModelId(entry.id, enabled)) continue;
-        if (wantActiveOnly && rawActiveIds.size > 0 && !rawActiveIds.has(entry.id)) continue;
-      }
+        if (canonicalDedup.has(entry.id)) continue;
+        // Combo-member carve-out: a model whose provider prefix participates in
+        // a published combo is exempt from usableOnly/enabledOnly/activeOnly so
+        // the combo's runtime expansion can find its concrete members.
+        //
+        // Security gate (audit 2026-08-30): when `enabledOnly` is active with
+        // populated connections, the carve-out only fires for prefixes the
+        // operator has EXPLICITLY enabled. This stops an upstream-admin combo
+        // declaration from re-surfacing `isActive:false` providers. When
+        // `enabled` is undefined (soft-fail / connections empty), the carve-out
+        // still applies — preserves behaviour for operators not running with
+        // `enabledOnly`.
+        const slash = entry.id.indexOf("/");
+        const entryPrefix = slash > 0 ? entry.id.slice(0, slash) : "";
+        const isComboMember = entryPrefix.length > 0 && comboMemberPrefixes.has(entryPrefix);
+        const carveOutApplies =
+          isComboMember && (!enabled || enabled.prefixes.has(entryPrefix));
+        if (!carveOutApplies) {
+          if (usable && !isUsableRawModelId(entry.id, usable, rawEnrichment)) continue;
+          if (enabled && !isEnabledRawModelId(entry.id, enabled)) continue;
+          if (wantActiveOnly && rawActiveIds.size > 0 && !rawActiveIds.has(entry.id)) continue;
+        }
         const model = mapRawModelToModelV2(entry, {
           // #6859: server-facing id — NOT the OC-gate-prefixed `resolved.providerId`.
           providerId: resolved.omnirouteProviderId,
@@ -4774,7 +4809,7 @@ export function buildStaticProviderEntry(
     // Skip the 20 named no-slash entries that shadow combos under the
     // `combo/<name>` namespace. We keep `codex-auto-review` and any other
     // future no-slash raw entry that doesn't have a matching combo.
-if (comboNames.has(raw.id)) continue;
+    if (comboNames.has(raw.id)) continue;
     // Skip canonical-named twins when the alias-keyed enriched row exists.
     if (canonicalDedup.has(raw.id)) continue;
     // Combo-member carve-out: a model whose provider prefix participates in
@@ -4783,10 +4818,20 @@ if (comboNames.has(raw.id)) continue;
     // model still has to satisfy all other catalog invariants (non-empty
     // id, canonical-dedup, combo-name dedup). Non-member models with the
     // same prefix keep their normal filter verdict.
+    //
+    // Security gate (audit 2026-08-30): when `enabledOnly` is active with
+    // populated connections, the carve-out only fires for prefixes the
+    // operator has EXPLICITLY enabled. This stops an upstream-admin combo
+    // declaration from re-surfacing `isActive:false` providers. When
+    // `enabled` is undefined (soft-fail / connections empty), the carve-out
+    // still applies — preserves behaviour for operators not running with
+    // `enabledOnly`.
     const slash = raw.id.indexOf("/");
     const rawPrefix = slash > 0 ? raw.id.slice(0, slash) : "";
     const isComboMember = rawPrefix.length > 0 && comboMemberPrefixes.has(rawPrefix);
-    if (!isComboMember) {
+    const carveOutApplies =
+      isComboMember && (!enabled || enabled.prefixes.has(rawPrefix));
+    if (!carveOutApplies) {
       if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
       if (enabled && !isEnabledRawModelId(raw.id, enabled)) continue;
       if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !matchesActiveId(raw.id, activeModelIds)) continue;
