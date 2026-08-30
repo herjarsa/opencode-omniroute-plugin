@@ -3140,6 +3140,52 @@ export function isEnabledRawModelId(id: string, enabled: EnabledProviderSet): bo
 }
 
 /**
+ * Build the set of provider prefixes that participate in a published combo,
+/**
+ * Build the set of provider prefixes that participate in a published combo,
+ * either as a DB-combo member ref (`combo.models[].model`) or as an
+ * auto-combo candidate-pool entry (`autoCombo.candidatePool[]`).
+ *
+ * These prefixes get a carve-out from `usableOnly` / `enabledOnly` /
+ * `activeOnly` at the filter site: when OC expands `auto/<x>` or
+ * `combo/<x>` at runtime it validates the EXPANDED id against the
+ * catalog, so a combo member that was filtered out would surface as
+ * `ProviderModelNotFoundError: Model not found: … Did you mean:
+ * auto/<x>?` even though the combo itself is published and routable.
+ *
+ * Carve-out applies to the prefix only — the model itself still has to
+ * exist in the raw catalog and pass all non-prefix filters (caps,
+ * enrichment dedup, etc.). Non-member models with the same prefix are
+ * unaffected; they keep their normal filter verdict.
+ */
+export function buildComboMemberPrefixes(
+  rawCombos: OmniRouteRawCombo[],
+  rawAutoCombos?: OmniRouteRawAutoCombo[]
+): Set<string> {
+  const prefixes = new Set<string>();
+  for (const combo of rawCombos) {
+    if (!combo || combo.isHidden === true) continue;
+    const steps = Array.isArray(combo.models) ? combo.models : [];
+    for (const step of steps) {
+      if (step?.kind !== "model") continue;
+      if (typeof step.model !== "string" || step.model.length === 0) continue;
+      const slash = step.model.indexOf("/");
+      if (slash > 0) prefixes.add(step.model.slice(0, slash));
+    }
+  }
+  for (const autoCombo of rawAutoCombos ?? []) {
+    if (!autoCombo || autoCombo.isHidden === true) continue;
+    const pool = Array.isArray(autoCombo.candidatePool) ? autoCombo.candidatePool : [];
+    for (const prefix of pool) {
+      if (typeof prefix === "string" && prefix.length > 0) {
+        prefixes.add(prefix);
+      }
+    }
+  }
+  return prefixes;
+}
+
+/**
  * Simple exact match for activeOnly filter.
  *
  * OmniRoute's /api/models endpoint returns IDs that may not match /v1/models
@@ -3707,7 +3753,13 @@ const diskSnapshotReader = deps.diskSnapshotReader ?? defaultDiskSnapshotReader;
       // the alias key and skip the canonical twin entirely.
       const canonicalToAlias = buildCanonicalToAliasMap(rawEnrichment);
       const canonicalDedup = canonicalDedupSet(rawModels, canonicalToAlias);
-      const aliasIndex = buildAliasIndex(rawEnrichment);
+const aliasIndex = buildAliasIndex(rawEnrichment);
+      // Combo-member surfacing: collect every provider prefix that participates
+      // in a published combo (DB member refs + auto candidatePool). These
+      // prefixes get a carve-out from usableOnly / enabledOnly / activeOnly at
+      // the filter site below — otherwise OC raises ProviderModelNotFoundError
+      // when it expands auto/<x> or combo/<x> at runtime.
+      const comboMemberPrefixes = buildComboMemberPrefixes(rawCombos, rawAutoCombos);
 
       // Map raw models → ModelV2 keyed by id. When enrichment data is
       // present (features.enrichment, default on), overlay the nicer
@@ -3717,10 +3769,18 @@ const diskSnapshotReader = deps.diskSnapshotReader ?? defaultDiskSnapshotReader;
       const models: Record<string, ModelV2> = {};
       for (const entry of rawModels) {
         if (!entry.id) continue;
-        if (canonicalDedup.has(entry.id)) continue;
+if (canonicalDedup.has(entry.id)) continue;
+      // Combo-member carve-out: a model whose provider prefix participates in
+      // a published combo is exempt from usableOnly/enabledOnly/activeOnly so
+      // the combo's runtime expansion can find its concrete members.
+      const slash = entry.id.indexOf("/");
+      const entryPrefix = slash > 0 ? entry.id.slice(0, slash) : "";
+      const isComboMember = entryPrefix.length > 0 && comboMemberPrefixes.has(entryPrefix);
+      if (!isComboMember) {
         if (usable && !isUsableRawModelId(entry.id, usable, rawEnrichment)) continue;
         if (enabled && !isEnabledRawModelId(entry.id, enabled)) continue;
         if (wantActiveOnly && rawActiveIds.size > 0 && !rawActiveIds.has(entry.id)) continue;
+      }
         const model = mapRawModelToModelV2(entry, {
           // #6859: server-facing id — NOT the OC-gate-prefixed `resolved.providerId`.
           providerId: resolved.omnirouteProviderId,
@@ -4692,7 +4752,13 @@ export function buildStaticProviderEntry(
     if (!combo || combo.isHidden === true) continue;
     const name = combo.name && combo.name.trim().length > 0 ? combo.name.trim() : combo.id;
     if (typeof name === "string" && name.length > 0) comboNames.add(name);
-  }
+}
+  // Combo-member surfacing: collect every provider prefix that participates
+  // in a published combo (DB member refs + auto candidatePool). These
+  // prefixes get a carve-out from usableOnly / enabledOnly / activeOnly at
+  // the filter site below — otherwise OC raises ProviderModelNotFoundError
+  // when it expands auto/<x> or combo/<x> at runtime.
+  const comboMemberPrefixes = buildComboMemberPrefixes(rawCombos, rawAutoCombos);
 
   // Build the canonical→alias reverse map AND the canonical-dedup set
   // once per static-block construction. Same shape as the dynamic hook
@@ -4708,12 +4774,23 @@ export function buildStaticProviderEntry(
     // Skip the 20 named no-slash entries that shadow combos under the
     // `combo/<name>` namespace. We keep `codex-auto-review` and any other
     // future no-slash raw entry that doesn't have a matching combo.
-    if (comboNames.has(raw.id)) continue;
+if (comboNames.has(raw.id)) continue;
     // Skip canonical-named twins when the alias-keyed enriched row exists.
     if (canonicalDedup.has(raw.id)) continue;
-    if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
-    if (enabled && !isEnabledRawModelId(raw.id, enabled)) continue;
-    if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !matchesActiveId(raw.id, activeModelIds)) continue;
+    // Combo-member carve-out: a model whose provider prefix participates in
+    // a published combo is exempt from usableOnly/enabledOnly/activeOnly so
+    // the combo's runtime expansion can find its concrete members. The
+    // model still has to satisfy all other catalog invariants (non-empty
+    // id, canonical-dedup, combo-name dedup). Non-member models with the
+    // same prefix keep their normal filter verdict.
+    const slash = raw.id.indexOf("/");
+    const rawPrefix = slash > 0 ? raw.id.slice(0, slash) : "";
+    const isComboMember = rawPrefix.length > 0 && comboMemberPrefixes.has(rawPrefix);
+    if (!isComboMember) {
+      if (usable && !isUsableRawModelId(raw.id, usable, enrichment)) continue;
+      if (enabled && !isEnabledRawModelId(raw.id, enabled)) continue;
+      if (wantActiveOnly && activeModelIds && activeModelIds.size > 0 && !matchesActiveId(raw.id, activeModelIds)) continue;
+    }
     // Note: matchesActiveId uses smart matching because OmniRoute's
     // /api/models returns IDs with extra sub-paths that don't match /v1/models.
     // If no match found, the model is hidden. Users who want all models
