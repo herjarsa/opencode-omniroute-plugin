@@ -2,3 +2,11 @@ node_modules
 dist
 *.log
 .DS_Store
+.omo/
+.codegraph/
+graphify-out/
+manual-qa/
+bench-*.mjs
+validate-*.mjs
+.env
+AGENTS.md
