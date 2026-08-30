@@ -10,3 +10,5 @@ bench-*.mjs
 validate-*.mjs
 .env
 AGENTS.md
+tests/startup-speed.test.ts
+tests/combo-member-surface.test.ts.bak
