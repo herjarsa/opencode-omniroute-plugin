@@ -1,7 +1,7 @@
 {
   "name": "opencode-omniroute-plugin",
-  "version": "0.2.28",
-  "description": "OpenCode plugin for the OmniRoute AI Gateway. Drives dynamic model discovery, /connect auth flow, and multi-instance OmniRoute providers via the official @opencode-ai/plugin contract.",
+  "version": "0.3.0",
+  "description": "OpenCode plugin for the OmniRoute AI Gateway. Drives dynamic model discovery, /connect auth flow, and multi-instance OmniRoute providers. Dual V1 (`@opencode-ai/plugin` server) + V2 Desktop (`@opencode/plugin` setup) entrypoint.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,7 +24,7 @@
     "build": "tsup",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "deploy-local": "node deploy-local.js",
-    "test": "node --import tsx/esm --test tests/scaffold.test.ts tests/auth.test.ts tests/options-schema.test.ts tests/multi-instance.test.ts tests/fetch-interceptor.test.ts tests/provider.test.ts tests/gemini-sanitize.test.ts tests/combos.test.ts tests/config-shim.test.ts tests/features.test.ts tests/feature-defaults.test.ts tests/usable-combo.test.ts tests/disk-snapshot-perms.test.ts tests/fork-features.test.ts tests/auto-combo-context.test.ts tests/provider-id-routing.test.ts tests/management-read-token.test.ts tests/auto-sync.test.ts tests/startup-sync.test.ts tests/context-lcd.test.ts tests/bare-key.test.ts tests/auto-combo-naming.test.ts tests/last-known-good.test.ts tests/active-only-sync.test.ts tests/enabled-only.test.ts",
+    "test": "node --import tsx/esm --test tests/scaffold.test.ts tests/auth.test.ts tests/options-schema.test.ts tests/multi-instance.test.ts tests/fetch-interceptor.test.ts tests/provider.test.ts tests/gemini-sanitize.test.ts tests/combos.test.ts tests/config-shim.test.ts tests/features.test.ts tests/feature-defaults.test.ts tests/usable-combo.test.ts tests/disk-snapshot-perms.test.ts tests/fork-features.test.ts tests/auto-combo-context.test.ts tests/provider-id-routing.test.ts tests/management-read-token.test.ts tests/auto-sync.test.ts tests/startup-sync.test.ts tests/context-lcd.test.ts tests/bare-key.test.ts tests/auto-combo-naming.test.ts tests/last-known-good.test.ts tests/active-only-sync.test.ts tests/enabled-only.test.ts tests/v2-compat.test.ts",
     "prepublishOnly": "npm run clean && npm run build && npm test"
   },
   "keywords": [
@@ -55,7 +55,13 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "*"
+    "@opencode-ai/plugin": "*",
+    "@opencode/plugin": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
   },
   "dependencies": {
     "zod": "^4.4.3"
@@ -63,6 +69,7 @@
   "devDependencies": {
     "@colbymchenry/codegraph": "^1.6.0",
     "@opencode-ai/plugin": "^1.15.6",
+    "@opencode/plugin": "^2.0.16",
     "@types/node": "^22.19.19",
     "tsup": "^8.5.1",
     "tsx": "^4.22.3",

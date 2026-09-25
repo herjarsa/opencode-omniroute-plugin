@@ -1277,6 +1277,8 @@ export const OmniRoutePlugin: Plugin = async (_input, options) => {
   }
 };
 
+import { setupOmniRouteV2 } from "./v2.js";
+
 /**
  * v1 plugin shape per OC plugin loader (`packages/opencode/src/plugin/shared.ts:readV1Plugin`).
  * OC checks the default export for an object with `{id, server}` shape FIRST.
@@ -1294,7 +1296,27 @@ const OmniRouteV1Plugin = {
   server: OmniRoutePlugin,
 };
 
-export default OmniRouteV1Plugin;
+/**
+ * Dual V1+V2 default export.
+ *
+ *   - V1 hosts (≥1.18.29) call `server()` and use the returned hooks
+ *     (auth + provider + config + tool). Untouched by the V2 migration.
+ *   - V2 hosts (Desktop v2) read `id` + `setup(ctx)` and ignore `server()`.
+ *     `setupOmniRouteV2` registers the same catalog through the V2
+ *     `ctx.provider / ctx.integration / ctx.tool / ctx.command / ctx.mcp /
+ *     ctx.session` domains (see `src/v2.ts`).
+ *
+ * Both implementations are bundled into the single `dist/index.js`
+ * artifact with no new runtime dependency (`src/v2.ts` uses `import
+ * type` only for V2 shapes), so existing V1 installs keep working
+ * byte-for-byte while V2 loads the same file via `setup()`.
+ */
+const OmniRouteDualPlugin = {
+  ...OmniRouteV1Plugin,
+  setup: setupOmniRouteV2,
+};
+
+export default OmniRouteDualPlugin;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Provider hook (T-03) — /v1/models pass-through with TTL cache
