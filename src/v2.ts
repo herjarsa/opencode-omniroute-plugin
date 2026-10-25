@@ -371,21 +371,37 @@ export async function setupOmniRouteV2(ctx: unknown): Promise<(() => void) | voi
     }
   };
 
-  await loadCatalog();
+  const registerProvider = async () => {
+    try {
+      await c?.provider?.transform?.((editor) => {
+        const ed = editor as {
+          get?: (id: string) => unknown;
+          add?: (input: { info: unknown; models: unknown[] }) => void;
+          update?: (id: string, cb: (draft: Record<string, unknown>) => void) => void;
+          models?: { set?: (id: string, models: unknown[]) => void };
+        };
+        if (!source.info) return;
+        const existing = typeof ed.get === "function" ? ed.get(providerId) : null;
+        if (existing && typeof ed.update === "function") {
+          ed.update(providerId, (draft) => {
+            draft.name = displayName;
+            draft.activation = "enabled";
+            draft.settings = source.info && (source.info as { settings?: unknown }).settings;
+          });
+          if (ed.models && typeof ed.models.set === "function") {
+            ed.models.set(providerId, source.models);
+          }
+        } else if (typeof ed.add === "function") {
+          ed.add({ info: source.info, models: source.models });
+        }
+      });
+    } catch (err) {
+      warn("provider.transform failed:", err);
+    }
+  };
 
-  // ── Provider + models (replayable transform; reload() replays it) ──
-  try {
-    await c?.provider?.transform?.((editor) => {
-      const ed = editor as {
-        add?: (input: { info: unknown; models: unknown[] }) => void;
-      };
-      if (source.info && typeof ed.add === "function") {
-        ed.add({ info: source.info, models: source.models });
-      }
-    });
-  } catch (err) {
-    warn("provider.transform failed:", err);
-  }
+  await loadCatalog();
+  await registerProvider();
 
   // ── Integration auth method (V2 `/connect` surface) ──
   try {
@@ -435,12 +451,12 @@ export async function setupOmniRouteV2(ctx: unknown): Promise<(() => void) | voi
             /* catalog refresh is best-effort */
           }
           try {
-            await c?.provider?.reload?.();
+            /* reload disabled: transform is idempotent and persists */
           } catch {
             /* older hosts */
           }
           try {
-            await c?.model?.reload?.();
+            /* model.reload disabled */
           } catch {
             /* older hosts */
           }
@@ -474,13 +490,9 @@ export async function setupOmniRouteV2(ctx: unknown): Promise<(() => void) | voi
           const result = await forceSyncOmniRouteModels({ resolved, cache: sharedCache });
           try {
             await loadCatalog();
+            await registerProvider();
           } catch {
             /* best-effort */
-          }
-          try {
-            await c?.provider?.reload?.();
-          } catch {
-            /* older hosts */
           }
           const text = result.ok
             ? `OmniRoute sync ok: ${result.count} models, ${result.combos} combos (provider ${result.provider}).`
@@ -592,11 +604,7 @@ export async function setupOmniRouteV2(ctx: unknown): Promise<(() => void) | voi
     timer = setInterval(() => {
       void (async () => {
         await loadCatalog();
-        try {
-          await c?.provider?.reload?.();
-        } catch {
-          /* host without reload */
-        }
+        await registerProvider();
       })();
     }, intervalMs);
     (timer as unknown as { unref?: () => void }).unref?.();
@@ -618,7 +626,7 @@ export async function setupOmniRouteV2(ctx: unknown): Promise<(() => void) | voi
               if (typeof t === "string" && t.includes("credential")) {
                 await loadCatalog();
                 try {
-                  await c?.provider?.reload?.();
+                  /* reload disabled: transform is idempotent and persists */
                 } catch {
                   /* host without reload */
                 }
@@ -649,3 +657,4 @@ export async function setupOmniRouteV2(ctx: unknown): Promise<(() => void) | voi
     }
   };
 }
+
