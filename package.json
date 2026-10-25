@@ -1,5 +1,5 @@
 {
-  "name": "opencode-omniroute-plugin",
+  "name": "@herjarsa/opencode-omniroute-plugin",
   "version": "0.3.1",
   "description": "OpenCode plugin for the OmniRoute AI Gateway. Drives dynamic model discovery, /connect auth flow, and multi-instance OmniRoute providers. Dual V1 (`@opencode-ai/plugin` server) + V2 Desktop (`@opencode/plugin` setup) entrypoint.",
   "type": "module",
